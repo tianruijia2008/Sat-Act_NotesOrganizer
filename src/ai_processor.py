@@ -232,6 +232,147 @@ class AIProcessor:
                 "reasoning": f"Exception occurred: {str(e)}"
             }
 
+    def recommend_organization_strategy(self, content_items: List[Tuple[str, Dict[str, Any], str]]) -> Dict[str, Any]:
+        """
+        First-stage AI analysis to recommend content organization strategy.
+
+        Args:
+            content_items (List[Tuple[str, Dict[str, Any], str]]): List of tuples containing
+                (ocr_text, classification_result, image_filename)
+
+        Returns:
+            Dict[str, Any]: Organization strategy recommendation
+        """
+        try:
+            # Prepare the prompt for the AI model
+            content_descriptions = []
+            for i, (ocr_text, classification, image_filename) in enumerate(content_items):
+                char_count = len(ocr_text)
+                content_type = classification.get('classification', 'unknown')
+                confidence = classification.get('confidence', 0.0)
+
+                content_descriptions.append(
+                    f"Item {i+1} (File: {image_filename}, Type: {content_type}, "
+                    f"Confidence: {confidence:.2f}, Characters: {char_count}): {ocr_text[:200]}..."
+                )
+
+            prompt = f"""
+            Analyze the following SAT/ACT study materials and recommend the best organization strategy.
+            You must decide whether to:
+            1. Combine all items into a single comprehensive Markdown file
+            2. Create separate files for each item
+            3. Group related items into multiple files
+
+            Consider these factors:
+            - Content similarity and relationships
+            - Character count (longer content may need separate files)
+            - Content type (notes vs wrong questions)
+            - Educational value of grouping vs separation
+
+            Content items:
+            {'\n'.join(content_descriptions)}
+
+            Respond in JSON format with the following structure:
+            {{
+                "strategy": "combine_all" or "separate_all" or "group_related",
+                "reasoning": "explanation of why this strategy was chosen",
+                "groups": [
+                    {{
+                        "name": "descriptive name for this group",
+                        "items": [list of item indices that belong together],
+                        "rationale": "why these items should be grouped"
+                    }}
+                ],
+                "recommendations": {{
+                    "file_naming": "suggestion for file naming convention",
+                    "content_structure": "suggestion for how to structure the content"
+                }}
+            }}
+
+            Important rules:
+            - If strategy is "combine_all", groups should contain all items in one group
+            - If strategy is "separate_all", groups should contain one item each
+            - If strategy is "group_related", groups should logically cluster related items
+            - Always provide exactly one group if strategy is "combine_all"
+            """
+
+            # Prepare the payload for the API request
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.4,
+                "max_tokens": 1500
+            }
+
+            # Send the request to the ModelScope API
+            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=120)
+
+            if response.status_code == 200:
+                result = response.json()
+
+                # Extract the content from the response
+                if 'choices' in result and len(result['choices']) > 0:
+                    content = result['choices'][0].get('message', {}).get('content', '')
+
+                    # Try to parse the JSON response
+                    try:
+                        recommendation = json.loads(content)
+                        self.logger.info(f"Successfully generated organization strategy: {recommendation.get('strategy')}")
+                        return recommendation
+                    except json.JSONDecodeError:
+                        # If JSON parsing fails, return a default response
+                        self.logger.warning("Failed to parse JSON response from AI model for organization strategy")
+                        return {
+                            "strategy": "separate_all",
+                            "reasoning": "Could not parse AI response, defaulting to separate files",
+                            "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
+                                      for i in range(len(content_items))],
+                            "recommendations": {
+                                "file_naming": "individual_item_{{index}}",
+                                "content_structure": "Separate files for each item"
+                            }
+                        }
+                else:
+                    self.logger.error("Unexpected response format from AI model for organization strategy")
+                    return {
+                        "strategy": "separate_all",
+                        "reasoning": "Unexpected response format, defaulting to separate files",
+                        "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
+                                  for i in range(len(content_items))],
+                        "recommendations": {
+                            "file_naming": "individual_item_{{index}}",
+                            "content_structure": "Separate files for each item"
+                        }
+                    }
+            else:
+                self.logger.error(f"Failed to generate organization strategy. Status code: {response.status_code}")
+                self.logger.error(f"Response: {response.text}")
+                return {
+                    "strategy": "separate_all",
+                    "reasoning": f"API request failed with status {response.status_code}, defaulting to separate files",
+                    "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
+                              for i in range(len(content_items))],
+                    "recommendations": {
+                        "file_naming": "individual_item_{{index}}",
+                        "content_structure": "Separate files for each item"
+                    }
+                }
+
+        except Exception as e:
+            self.logger.error(f"Error generating organization strategy: {str(e)}")
+            return {
+                "strategy": "separate_all",
+                "reasoning": f"Exception occurred: {str(e)}, defaulting to separate files",
+                "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
+                          for i in range(len(content_items))],
+                "recommendations": {
+                    "file_naming": "individual_item_{{index}}",
+                    "content_structure": "Separate files for each item"
+                }
+            }
+
     def organize_content_batch(self, content_items: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
         """
         Organize a batch of content items (notes and wrong questions) into structured format.
@@ -338,6 +479,59 @@ class AIProcessor:
                 "wrong_questions": [],
                 "relationships": f"Exception occurred: {str(e)}"
             }
+
+    def organize_content_by_groups(self, content_items: List[Tuple[str, Dict[str, Any], str]],
+                                 groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Second-stage AI processing to organize content according to recommended groups.
+
+        Args:
+            content_items (List[Tuple[str, Dict[str, Any], str]]): List of tuples containing
+                (ocr_text, classification_result, image_filename)
+            groups (List[Dict[str, Any]]): Group definitions from recommendation
+
+        Returns:
+            List[Dict[str, Any]]: List of organized content for each group
+        """
+        organized_groups = []
+
+        try:
+            for group in groups:
+                group_name = group.get('name', 'Unnamed Group')
+                item_indices = group.get('items', [])
+
+                # Extract content items for this group
+                group_content_items = [content_items[i] for i in item_indices if i < len(content_items)]
+
+                # Convert to the format expected by organize_content_batch
+                batch_items = [(item[0], item[1]) for item in group_content_items]
+
+                # Organize the content in this group
+                organized_content = self.organize_content_batch(batch_items)
+                organized_content['group_name'] = group_name
+                organized_content['group_rationale'] = group.get('rationale', '')
+                organized_content['item_indices'] = item_indices
+                organized_content['source_files'] = [content_items[i][2] for i in item_indices if i < len(content_items)]
+
+                organized_groups.append(organized_content)
+
+            self.logger.info(f"Successfully organized content into {len(organized_groups)} groups")
+            return organized_groups
+
+        except Exception as e:
+            self.logger.error(f"Error organizing content by groups: {str(e)}")
+            # Fallback: organize each item separately
+            fallback_groups = []
+            for i, (ocr_text, classification, image_filename) in enumerate(content_items):
+                batch_items = [(ocr_text, classification)]
+                organized_content = self.organize_content_batch(batch_items)
+                organized_content['group_name'] = f"Item {i+1}: {image_filename}"
+                organized_content['group_rationale'] = "Fallback organization - individual item"
+                organized_content['item_indices'] = [i]
+                organized_content['source_files'] = [image_filename]
+                fallback_groups.append(organized_content)
+
+            return fallback_groups
 
 # Example usage
 if __name__ == "__main__":

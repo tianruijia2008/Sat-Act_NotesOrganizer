@@ -9,7 +9,8 @@ import sys
 import time
 import logging
 import argparse
-from typing import Any, Optional
+import json
+from typing import Any, Optional, List, Tuple, Dict
 
 # Add the parent directory to the path to allow imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -43,7 +44,8 @@ class SATActNotesOrganizer:
         self.notes_saver = NotesSaver("data/notes")
 
         # Accumulated content for batch processing
-        self.accumulated_content: list[tuple[str, dict[str, Any]]] = []
+        # Now includes image filename: (ocr_text, classification_result, image_filename)
+        self.accumulated_content: list[tuple[str, dict[str, Any], str]] = []
 
     def process_new_image(self, image_path: str):
         """
@@ -71,27 +73,149 @@ class SATActNotesOrganizer:
             image_filename = os.path.basename(image_path)
             self.notes_saver.save_classification_result(ocr_text, classification_result, image_filename)
 
-            # Step 4: Add to accumulated content for batch processing
-            self.accumulated_content.append((ocr_text, classification_result))
+            # Step 4: Add to accumulated content for batch processing (with filename)
+            self.accumulated_content.append((ocr_text, classification_result, image_filename))
 
             self.logger.info(f"Successfully processed {image_path}")
 
         except Exception as e:
             self.logger.error(f"Error processing image {image_path}: {str(e)}")
 
-    def process_batch(self):
+    def process_with_two_stage_ai(self):
         """
-        Process accumulated content in batch mode.
+        Process accumulated content using two-stage AI approach.
         """
         if not self.accumulated_content:
             self.logger.info("No accumulated content to process")
             return
 
         try:
-            self.logger.info(f"Processing batch of {len(self.accumulated_content)} items")
+            self.logger.info(f"Processing batch of {len(self.accumulated_content)} items with two-stage AI")
+
+            # Stage 1: Get organization strategy recommendation from AI
+            self.logger.info("Stage 1: Getting organization strategy recommendation from AI")
+            recommendation = self.ai_processor.recommend_organization_strategy(self.accumulated_content)
+
+            strategy = recommendation.get('strategy', 'separate_all')
+            reasoning = recommendation.get('reasoning', 'No reasoning provided')
+            groups = recommendation.get('groups', [])
+            recommendations = recommendation.get('recommendations', {})
+
+            # Print the first-stage AI output
+            print("\n" + "="*60)
+            print("FIRST-STAGE AI ANALYSIS - ORGANIZATION STRATEGY")
+            print("="*60)
+            print(f"Strategy: {strategy}")
+            print(f"Reasoning: {reasoning}")
+            print(f"Number of groups: {len(groups)}")
+            if recommendations:
+                print(f"File naming recommendation: {recommendations.get('file_naming', 'N/A')}")
+                print(f"Content structure recommendation: {recommendations.get('content_structure', 'N/A')}")
+            print("\nGroups:")
+            for i, group in enumerate(groups):
+                print(f"  Group {i+1}: {group.get('name', 'Unnamed Group')}")
+                print(f"    Items: {group.get('items', [])}")
+                print(f"    Rationale: {group.get('rationale', 'No rationale provided')}")
+            print("="*60 + "\n")
+
+            self.logger.info(f"AI recommended strategy: {strategy}")
+            self.logger.info(f"Reasoning: {reasoning}")
+            self.logger.info(f"Number of groups: {len(groups)}")
+
+            # Stage 2: Process content according to recommended strategy
+            if strategy == 'combine_all' and len(groups) > 0:
+                # Combine all items into a single comprehensive file
+                self.logger.info("Combining all items into a single file")
+                group = groups[0]  # There should be only one group for combine_all strategy
+                item_indices = group.get('items', [])
+
+                # Extract content items for this group
+                group_content_items = [self.accumulated_content[i] for i in item_indices if i < len(self.accumulated_content)]
+
+                # Convert to the format expected by organize_content_batch
+                batch_items = [(item[0], item[1]) for item in group_content_items]
+
+                # Organize the content
+                organized_content = self.ai_processor.organize_content_batch(batch_items)
+                organized_content['group_name'] = group.get('name', 'Combined Content')
+                organized_content['group_rationale'] = group.get('rationale', 'Combined all items')
+                organized_content['item_indices'] = item_indices
+                organized_content['source_files'] = [self.accumulated_content[i][2] for i in item_indices if i < len(self.accumulated_content)]
+
+                # Save organized content
+                batch_name = f"combined_{int(time.time())}"
+                saved_path = self.notes_saver.save_organized_content(organized_content, batch_name)
+                self.logger.info(f"Successfully saved combined content to {saved_path}")
+
+            elif strategy == 'separate_all':
+                # Create separate files for each item
+                self.logger.info("Creating separate files for each item")
+                for i, (ocr_text, classification_result, image_filename) in enumerate(self.accumulated_content):
+                    batch_items = [(ocr_text, classification_result)]
+                    organized_content = self.ai_processor.organize_content_batch(batch_items)
+                    organized_content['group_name'] = f"Item {i+1}: {image_filename}"
+                    organized_content['group_rationale'] = "Individual item processing"
+                    organized_content['item_indices'] = [i]
+                    organized_content['source_files'] = [image_filename]
+
+                    # Save organized content
+                    batch_name = f"individual_{i+1}_{int(time.time())}"
+                    saved_path = self.notes_saver.save_organized_content(organized_content, batch_name)
+                    self.logger.info(f"Successfully saved individual content to {saved_path}")
+
+            elif strategy == 'group_related' and len(groups) > 0:
+                # Group related items into multiple files
+                self.logger.info("Grouping related items into multiple files")
+                organized_groups = self.ai_processor.organize_content_by_groups(self.accumulated_content, groups)
+
+                for i, organized_content in enumerate(organized_groups):
+                    group_name = organized_content.get('group_name', f'Group {i+1}')
+                    # Save organized content
+                    batch_name = f"group_{i+1}_{group_name.replace(' ', '_').replace('/', '_')}_{int(time.time())}"
+                    saved_path = self.notes_saver.save_organized_content(organized_content, batch_name)
+                    self.logger.info(f"Successfully saved group content to {saved_path}")
+
+            else:
+                # Fallback: process each item separately
+                self.logger.warning("Unknown strategy or no groups defined, falling back to individual processing")
+                for i, (ocr_text, classification_result, image_filename) in enumerate(self.accumulated_content):
+                    batch_items = [(ocr_text, classification_result)]
+                    organized_content = self.ai_processor.organize_content_batch(batch_items)
+                    organized_content['group_name'] = f"Fallback Item {i+1}: {image_filename}"
+                    organized_content['group_rationale'] = "Fallback processing"
+                    organized_content['item_indices'] = [i]
+                    organized_content['source_files'] = [image_filename]
+
+                    # Save organized content
+                    batch_name = f"fallback_{i+1}_{int(time.time())}"
+                    saved_path = self.notes_saver.save_organized_content(organized_content, batch_name)
+                    self.logger.info(f"Successfully saved fallback content to {saved_path}")
+
+            # Clear accumulated content
+            self.accumulated_content.clear()
+
+        except Exception as e:
+            self.logger.error(f"Error processing with two-stage AI: {str(e)}")
+            # Fallback to simple batch processing if two-stage AI fails
+            self.logger.info("Falling back to simple batch processing")
+            self.process_simple_batch()
+
+    def process_simple_batch(self):
+        """
+        Fallback method: process accumulated content in simple batch mode.
+        """
+        if not self.accumulated_content:
+            self.logger.info("No accumulated content to process")
+            return
+
+        try:
+            self.logger.info(f"Processing batch of {len(self.accumulated_content)} items (simple mode)")
+
+            # Convert to the format expected by organize_content_batch
+            batch_items = [(item[0], item[1]) for item in self.accumulated_content]
 
             # Step 1: Organize content using AI
-            organized_content = self.ai_processor.organize_content_batch(self.accumulated_content)
+            organized_content = self.ai_processor.organize_content_batch(batch_items)
 
             # Step 2: Save organized content
             batch_name = f"batch_{int(time.time())}"
@@ -103,7 +227,7 @@ class SATActNotesOrganizer:
             self.accumulated_content.clear()
 
         except Exception as e:
-            self.logger.error(f"Error processing batch: {str(e)}")
+            self.logger.error(f"Error processing simple batch: {str(e)}")
 
     def process_existing_images(self):
         """
@@ -122,9 +246,9 @@ class SATActNotesOrganizer:
         for image_path in existing_images:
             self.process_new_image(image_path)
 
-        # Process accumulated content in batch
+        # Process accumulated content with two-stage AI approach
         if self.accumulated_content:
-            self.process_batch()
+            self.process_with_two_stage_ai()
 
     def run(self):
         """
@@ -152,13 +276,13 @@ class SATActNotesOrganizer:
                         time.sleep(1)
                         # Process batch every 10 items or every 5 minutes
                         if len(self.accumulated_content) >= 10:
-                            self.process_batch()
+                            self.process_with_two_stage_ai()
                 except KeyboardInterrupt:
                     self.logger.info("Stopping watch mode...")
                     self.file_watcher.stop()
                     # Process any remaining accumulated content
                     if self.accumulated_content:
-                        self.process_batch()
+                        self.process_with_two_stage_ai()
             else:
                 # Batch mode: process existing images and exit
                 self.logger.info("Running in batch mode")
