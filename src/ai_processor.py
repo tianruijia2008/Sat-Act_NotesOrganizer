@@ -1,37 +1,34 @@
 import json
 import requests
 import logging
-from typing import Any, cast, Dict, List, Optional, Tuple
+from typing import Any, cast, Optional
+import logging
 
 from src.utils import load_config, get_provider_config
+from src.vector_db import VectorDB
 
 class AIProcessor:
     """
     AI Processor for interacting with ModelScope API to analyze SAT/ACT content.
     """
 
-    config: dict[str, Any]
-    provider_config: dict[str, Any]
-    base_url: str
-    api_key: str
-    model: str
-    logger: logging.Logger
-    headers: dict[str, str]
-
-    def __init__(self, config_path: str | None = None):
+    def __init__(self, config_path: Optional[str] = None):
         """
         Initialize AI processor with configuration.
 
         Args:
             config_path (str | None): Path to the config file
         """
+        # Initialize logger first
+        self.logger = logging.getLogger(__name__)
+
         # Ensure config_path is a string for load_config
         config_path_str = config_path if config_path is not None else ""
-        self.config = load_config(config_path_str)
+        self.config: dict[str, Any] = load_config(config_path_str)
         provider_config = get_provider_config(self.config, 'modelscope')
         if provider_config is None:
             raise ValueError("ModelScope provider configuration not found in config file")
-        self.provider_config = cast(dict[str, Any], provider_config)
+        self.provider_config: dict[str, Any] = cast(dict[str, Any], provider_config)
 
         base_url = self.provider_config.get('base_url')
         api_key = self.provider_config.get('api_key')
@@ -44,18 +41,18 @@ class AIProcessor:
         if not isinstance(models, list) or not models or not isinstance(models[0], str):
             raise ValueError("At least one model must be specified in ModelScope provider configuration")
 
-        self.base_url = base_url
-        self.api_key = api_key
-        self.model = models[0]
+        self.base_url: str = base_url
+        self.api_key: str = api_key
+        self.model: str = models[0]
 
-        # Set up logging
-        self.logger = logging.getLogger(__name__)
-
-        # Set up headers for API requests
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+        # Initialize headers
+        self.headers: dict[str, str] = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
         }
+
+        # Initialize vector database with config
+        self.vector_db = VectorDB(config=self.config)
 
     def test_connection(self) -> bool:
         """
@@ -109,7 +106,7 @@ class AIProcessor:
             self.logger.error(f"Error verifying model access: {str(e)}")
             return False
 
-    def send_test_request(self) -> dict[str, Any] | None:
+    def send_test_request(self) -> Optional[dict[str, Any]]:
         """
         Send a test request to the ModelScope API.
 
@@ -145,7 +142,7 @@ class AIProcessor:
             self.logger.error(f"Error sending test request to ModelScope API: {str(e)}")
             return None
 
-    def classify_content(self, ocr_text: str) -> Dict[str, Any]:
+    def classify_content(self, ocr_text: str) -> dict[str, Any]:
         """
         Classify OCR extracted text as either a note or a wrong question.
 
@@ -156,22 +153,45 @@ class AIProcessor:
             Dict[str, Any]: Classification result with type and confidence
         """
         try:
+            # Get similar documents from vector database for context
+            similar_docs = self.vector_db.query_similar(ocr_text, top_k=3)
+
+            # Prepare context from similar documents, distinguishing sources
+            context_sections = []
+            for i, doc in enumerate(similar_docs):
+                # Determine source of the document
+                source = doc["metadata"].get("source", "unknown")
+                if source == "obsidian":
+                    source_label = "Obsidian Note"
+                    title = doc["metadata"].get("title", "Untitled")
+                    context_sections.append(f"Context {i+1} (Source: {source_label}, Title: {title}): {doc['text'][:200]}...")
+                else:
+                    doc_type = doc["metadata"].get("type", "unknown")
+                    doc_topic = doc["metadata"].get("topic", "unknown")
+                    context_sections.append(f"Context {i+1} (Source: OCR, Type: {doc_type}, Topic: {doc_topic}): {doc['text'][:200]}...")
+
+            context_str = "\n\n".join(context_sections) if context_sections else "No relevant context found."
+
             # Prepare the prompt for the AI model
             prompt = f"""
-            Analyze the following text extracted from an image and classify it as either a "note" or a "wrong question".
+            Analyze the following text extracted from an image and classify it as either a \"note\" or a \"wrong question\".
 
-            A "note" is educational content such as formulas, concepts, explanations, or study materials.
-            A "wrong question" is a practice problem or test question that was answered incorrectly,
+            A \"note\" is educational content such as formulas, concepts, explanations, or study materials.
+            A \"wrong question\" is a practice problem or test question that was answered incorrectly,
             typically with an explanation of the mistake and the correct approach.
+
+            Relevant context from previous materials:
+            {context_str}
 
             Text to analyze:
             {ocr_text}
 
             Respond in JSON format with the following structure:
             {{
-                "classification": "note" or "wrong_question",
-                "confidence": a number between 0 and 1,
-                "reasoning": "brief explanation of why this classification was chosen"
+                \"classification\": \"note\" or \"wrong_question\",
+                \"confidence\": a number between 0 and 1,
+                \"reasoning\": \"brief explanation of why this classification was chosen\",
+                \"related_to_context\": \"brief explanation of how this content relates to the provided context (if applicable)\"
             }}
             """
 
@@ -232,7 +252,7 @@ class AIProcessor:
                 "reasoning": f"Exception occurred: {str(e)}"
             }
 
-    def recommend_organization_strategy(self, content_items: List[Tuple[str, Dict[str, Any], str]]) -> Dict[str, Any]:
+    def recommend_organization_strategy(self, content_items: list[tuple[str, dict[str, Any], str]]) -> dict[str, Any]:
         """
         First-stage AI analysis to recommend content organization strategy.
 
@@ -244,6 +264,27 @@ class AIProcessor:
             Dict[str, Any]: Organization strategy recommendation
         """
         try:
+            # Get context from vector database about similar content
+            all_ocr_texts = [item[0] for item in content_items]
+            combined_text = " ".join(all_ocr_texts)
+            similar_docs = self.vector_db.query_similar(combined_text, top_k=5)
+
+            # Prepare context from similar documents, distinguishing sources
+            context_sections = []
+            for i, doc in enumerate(similar_docs):
+                # Determine source of the document
+                source = doc["metadata"].get("source", "unknown")
+                if source == "obsidian":
+                    source_label = "Obsidian Note"
+                    title = doc["metadata"].get("title", "Untitled")
+                    context_sections.append(f"Previous content {i+1} (Source: {source_label}, Title: {title}): {doc['text'][:200]}...")
+                else:
+                    doc_type = doc["metadata"].get("type", "unknown")
+                    doc_topic = doc["metadata"].get("topic", "unknown")
+                    context_sections.append(f"Previous content {i+1} (Source: OCR, Type: {doc_type}, Topic: {doc_topic}): {doc['text'][:200]}...")
+
+            context_str = "\n\n".join(context_sections) if context_sections else "No relevant previous content found."
+
             # Prepare the prompt for the AI model
             content_descriptions = []
             for i, (ocr_text, classification, image_filename) in enumerate(content_items):
@@ -268,9 +309,13 @@ class AIProcessor:
             - Character count (longer content may need separate files)
             - Content type (notes vs wrong questions)
             - Educational value of grouping vs separation
+            - Relationship to previously processed content (provided below)
+
+            Previously processed similar content:
+            {context_str}
 
             Content items:
-            {'\n'.join(content_descriptions)}
+            {chr(10).join(content_descriptions)}
 
             Respond in JSON format with the following structure:
             {{
@@ -286,7 +331,8 @@ class AIProcessor:
                 "recommendations": {{
                     "file_naming": "suggestion for file naming convention",
                     "content_structure": "suggestion for how to structure the content"
-                }}
+                }},
+                "relationship_to_previous_content": "how the new content relates to previously processed content"
             }}
 
             Important rules:
@@ -294,6 +340,7 @@ class AIProcessor:
             - If strategy is "separate_all", groups should contain one item each
             - If strategy is "group_related", groups should logically cluster related items
             - Always provide exactly one group if strategy is "combine_all"
+            - Consider how the new content relates to previously processed content when making recommendations
             """
 
             # Prepare the payload for the API request
@@ -330,7 +377,7 @@ class AIProcessor:
                             "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
                                       for i in range(len(content_items))],
                             "recommendations": {
-                                "file_naming": "individual_item_{{index}}",
+                                "file_naming": "individual_item_{index}",
                                 "content_structure": "Separate files for each item"
                             }
                         }
@@ -342,7 +389,7 @@ class AIProcessor:
                         "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
                                   for i in range(len(content_items))],
                         "recommendations": {
-                            "file_naming": "individual_item_{{index}}",
+                            "file_naming": "individual_item_{index}",
                             "content_structure": "Separate files for each item"
                         }
                     }
@@ -355,7 +402,7 @@ class AIProcessor:
                     "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
                               for i in range(len(content_items))],
                     "recommendations": {
-                        "file_naming": "individual_item_{{index}}",
+                        "file_naming": "individual_item_{index}",
                         "content_structure": "Separate files for each item"
                     }
                 }
@@ -368,12 +415,12 @@ class AIProcessor:
                 "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
                           for i in range(len(content_items))],
                 "recommendations": {
-                    "file_naming": "individual_item_{{index}}",
+                    "file_naming": "individual_item_{index}",
                     "content_structure": "Separate files for each item"
                 }
             }
 
-    def organize_content_batch(self, content_items: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    def organize_content_batch(self, content_items: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
         """
         Organize a batch of content items (notes and wrong questions) into structured format.
 
@@ -384,6 +431,27 @@ class AIProcessor:
             Dict[str, Any]: Organized content with relationships identified
         """
         try:
+            # Get context from vector database about similar content
+            all_ocr_texts = [item[0] for item in content_items]
+            combined_text = " ".join(all_ocr_texts)
+            similar_docs = self.vector_db.query_similar(combined_text, top_k=5)
+
+            # Prepare context from similar documents, distinguishing sources
+            context_sections = []
+            for i, doc in enumerate(similar_docs):
+                # Determine source of the document
+                source = doc["metadata"].get("source", "unknown")
+                if source == "obsidian":
+                    source_label = "Obsidian Note"
+                    title = doc["metadata"].get("title", "Untitled")
+                    context_sections.append(f"Previous content {i+1} (Source: {source_label}, Title: {title}): {doc['text'][:200]}...")
+                else:
+                    doc_type = doc["metadata"].get("type", "unknown")
+                    doc_topic = doc["metadata"].get("topic", "unknown")
+                    context_sections.append(f"Previous content {i+1} (Source: OCR, Type: {doc_type}, Topic: {doc_topic}): {doc['text'][:200]}...")
+
+            context_str = "\n\n".join(context_sections) if context_sections else "No relevant previous content found."
+
             # Prepare the prompt for the AI model
             content_descriptions = []
             for i, (ocr_text, classification) in enumerate(content_items):
@@ -394,9 +462,13 @@ class AIProcessor:
             prompt = f"""
             Organize the following SAT/ACT study materials into a structured format suitable for Obsidian notes.
             Identify relationships between notes and wrong questions, such as which notes relate to which wrong questions.
+            Also consider how this content relates to previously processed content provided below.
+
+            Previously processed similar content:
+            {context_str}
 
             Content items:
-            {'\n'.join(content_descriptions)}
+            {chr(10).join(content_descriptions)}
 
             Respond in JSON format with the following structure:
             {{
@@ -415,7 +487,8 @@ class AIProcessor:
                         "correct_approach": "correct approach to solve the problem"
                     }}
                 ],
-                "relationships": "description of how the items relate to each other"
+                "relationships": "description of how the items relate to each other",
+                "relationship_to_previous_content": "how this content relates to previously processed content"
             }}
             """
 
@@ -480,8 +553,8 @@ class AIProcessor:
                 "relationships": f"Exception occurred: {str(e)}"
             }
 
-    def organize_content_by_groups(self, content_items: List[Tuple[str, Dict[str, Any], str]],
-                                 groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def organize_content_by_groups(self, content_items: list[tuple[str, dict[str, Any], str]],
+                                 groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Second-stage AI processing to organize content according to recommended groups.
 
@@ -532,41 +605,3 @@ class AIProcessor:
                 fallback_groups.append(organized_content)
 
             return fallback_groups
-
-# Example usage
-if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(level=logging.INFO)
-
-    try:
-        # Initialize AI processor
-        ai_processor = AIProcessor()
-
-        print("AI Processor Test")
-        print("=================")
-        print(f"Base URL: {ai_processor.base_url}")
-        print(f"Model: {ai_processor.model}")
-
-        # Test connection
-        print("\n1. Testing connection...")
-        connection_success = ai_processor.test_connection()
-        print(f"Connection test: {'PASSED' if connection_success else 'FAILED'}")
-
-        if connection_success:
-            # Verify model access
-            print("\n2. Verifying model access...")
-            model_access = ai_processor.verify_model_access()
-            print(f"Model access: {'PASSED' if model_access else 'FAILED'}")
-
-            if model_access:
-                # Send test request
-                print("\n3. Sending test request...")
-                test_result = ai_processor.send_test_request()
-                if test_result:
-                    print("Test request: PASSED")
-                    print(f"Response: {json.dumps(test_result, indent=2)[:200]}...")
-                else:
-                    print("Test request: FAILED")
-
-    except Exception as e:
-        print(f"Error initializing AI processor: {str(e)}")

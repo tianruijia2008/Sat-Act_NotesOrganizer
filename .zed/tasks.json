@@ -1,0 +1,65 @@
+[
+  {
+    "label": "🚀 Launch Web UI (Local)",
+    "command": "python3",
+    "args": ["-m", "streamlit", "run", "ui/app.py", "--server.port", "8501"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "🌐 Create HTTPS Tunnel (Mobile Camera)",
+    "command": "ngrok",
+    "args": ["http", "8501"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "📝 Process All Images",
+    "command": "python3",
+    "args": ["script/run_all.py"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "👀 Watch & Process Images",
+    "command": "python3",
+    "args": ["script/run_all.py", "--watch"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "🧹 Clear Processed Data",
+    "command": "bash",
+    "args": ["clear_data.sh"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "📦 Install Dependencies",
+    "command": "pip",
+    "args": ["install", "-r", "requirements.txt"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "🔧 Install Tesseract OCR",
+    "command": "brew",
+    "args": ["install", "tesseract"],
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]

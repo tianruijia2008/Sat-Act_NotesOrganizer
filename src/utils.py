@@ -1,8 +1,9 @@
-import json
 import os
-from typing import Any
+import json
+from typing import Optional, Any
 
-def load_config(config_path: str | None = None) -> dict[str, Any]:
+
+def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
     """
     Load configuration from JSON file.
 
@@ -11,7 +12,7 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
                           If None, looks for config.json in the current directory.
 
     Returns:
-        Dict[str, Any]: Configuration dictionary
+        dict[str, Any]: Configuration dictionary
 
     Raises:
         FileNotFoundError: If config file is not found
@@ -30,16 +31,16 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
 
     return config
 
-def get_provider_config(config: dict[str, Any], provider_name: str) -> dict[str, Any] | None:
+def get_provider_config(config: dict[str, Any], provider_name: str) -> Optional[dict[str, Any]]:
     """
     Get configuration for a specific provider.
 
     Args:
-        config (Dict[str, Any]): The full configuration dictionary
+        config (dict[str, Any]): The full configuration dictionary
         provider_name (str): Name of the provider to look for
 
     Returns:
-        Optional[Dict[str, Any]]: Provider configuration or None if not found
+        Optional[dict[str, Any]]: Provider configuration or None if not found
     """
     providers = config.get('providers', [])
     for provider in providers:
@@ -47,16 +48,16 @@ def get_provider_config(config: dict[str, Any], provider_name: str) -> dict[str,
             return provider
     return None
 
-def get_model_config(config: dict[str, Any], model_name: str) -> dict[str, Any] | None:
+def get_model_config(config: dict[str, Any], model_name: str) -> Optional[dict[str, Any]]:
     """
     Get configuration for a specific model.
 
     Args:
-        config (Dict[str, Any]): The full configuration dictionary
+        config (dict[str, Any]): The full configuration dictionary
         model_name (str): Name of the model to look for
 
     Returns:
-        Optional[Dict[str, Any]]: Model configuration or None if not found
+        Optional[dict[str, Any]]: Model configuration or None if not found
     """
     providers = config.get('providers', [])
     for provider in providers:

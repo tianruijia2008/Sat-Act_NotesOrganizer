@@ -38,8 +38,12 @@ class SATActNotesOrganizer:
         self.logger = logging.getLogger(__name__)
 
         # Initialize components
+        config_dict = {}
+        if config_path:
+            from src.utils import load_config
+            config_dict = load_config(config_path)
         self.file_watcher = FileWatcher("data/raw", self.process_new_image)
-        self.ocr_processor = OCRProcessor()
+        self.ocr_processor = OCRProcessor(config_dict)
         self.ai_processor = AIProcessor(config_path)
         self.notes_saver = NotesSaver("data/notes")
 
@@ -58,7 +62,7 @@ class SATActNotesOrganizer:
             self.logger.info(f"Processing new image: {image_path}")
 
             # Step 1: Extract text using OCR
-            ocr_text = self.ocr_processor.extract_text(image_path)
+            ocr_text, doc_id = self.ocr_processor.extract_text(image_path)
             self.logger.info(f"Extracted {len(ocr_text)} characters from {image_path}")
 
             if not ocr_text.strip():
@@ -69,11 +73,22 @@ class SATActNotesOrganizer:
             classification_result = self.ai_processor.classify_content(ocr_text)
             self.logger.info(f"Classification result: {classification_result.get('classification')}")
 
-            # Step 3: Save individual classification result
+            # Step 3: Update document metadata in vector database with classification results
+            update_success = self.ocr_processor.update_document_metadata(doc_id, classification_result)
+            if update_success:
+                self.logger.info(f"Updated document {doc_id} with classification metadata")
+            else:
+                self.logger.warning(f"Failed to update document {doc_id} with classification metadata")
+
+            # Step 3: Update document metadata in vector database with classification results
+            # Note: We don't have the doc_id here, so we'll need to modify the OCR processor
+            # to return it or find another way to update the metadata
+
+            # Step 4: Save individual classification result
             image_filename = os.path.basename(image_path)
             self.notes_saver.save_classification_result(ocr_text, classification_result, image_filename)
 
-            # Step 4: Add to accumulated content for batch processing (with filename)
+            # Step 5: Add to accumulated content for batch processing (with filename)
             self.accumulated_content.append((ocr_text, classification_result, image_filename))
 
             self.logger.info(f"Successfully processed {image_path}")
@@ -249,6 +264,23 @@ class SATActNotesOrganizer:
         # Process accumulated content with two-stage AI approach
         if self.accumulated_content:
             self.process_with_two_stage_ai()
+            
+    def sync_obsidian_notes(self):
+        """
+        Sync notes from Obsidian vault to vector database.
+        """
+        try:
+            self.logger.info("Syncing Obsidian notes to vector database...")
+            
+            # Import notes from Obsidian
+            imported_count = self.ai_processor.vector_db.import_from_obsidian()
+            
+            self.logger.info(f"Successfully imported {imported_count} notes from Obsidian vault")
+            return imported_count
+            
+        except Exception as e:
+            self.logger.error(f"Error syncing Obsidian notes: {str(e)}")
+            return 0
 
     def run(self):
         """
@@ -263,6 +295,9 @@ class SATActNotesOrganizer:
                 return
 
             self.logger.info("AI connection successful")
+            
+            # Sync Obsidian notes at startup
+            self.sync_obsidian_notes()
 
             if self.watch_mode:
                 # Watch mode: continuously monitor for new images
@@ -313,12 +348,23 @@ def main():
         action="store_true",
         help="Run in continuous watch mode"
     )
+    parser.add_argument(
+        "--sync-obsidian",
+        action="store_true",
+        help="Sync Obsidian notes only and exit"
+    )
 
     args = parser.parse_args()
 
     # Initialize and run the orchestrator
     orchestrator = SATActNotesOrganizer(args.config, args.watch)
-    orchestrator.run()
+    
+    if args.sync_obsidian:
+        # Sync Obsidian notes only
+        orchestrator.sync_obsidian_notes()
+    else:
+        # Run normal processing
+        orchestrator.run()
 
 if __name__ == "__main__":
     main()

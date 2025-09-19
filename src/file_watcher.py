@@ -1,5 +1,4 @@
 import os
-
 import logging
 from typing import Callable, Optional
 from watchdog.observers import Observer
@@ -34,7 +33,9 @@ class ImageFileHandler(FileSystemEventHandler):
             if file_extension in self.image_extensions:
                 self.logger.info(f"New image file detected: {event.src_path}")
                 try:
-                    self.callback(event.src_path)
+                    # Ensure src_path is a string
+                    file_path = str(event.src_path)
+                    self.callback(file_path)
                 except Exception as e:
                     self.logger.error(f"Error processing new image file {event.src_path}: {str(e)}")
 
@@ -88,7 +89,7 @@ class FileWatcher:
         Returns:
             list[str]: List of image file paths
         """
-        image_files = []
+        image_files: list[str] = []
         if os.path.exists(self.watch_directory):
             for filename in os.listdir(self.watch_directory):
                 file_path = os.path.join(self.watch_directory, filename)

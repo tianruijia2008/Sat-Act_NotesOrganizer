@@ -14,7 +14,9 @@
       "name": "modelscope",
       "base_url": "https://api-inference.modelscope.cn/v1/chat/completions",
       "api_key": "ms-a8b41515-3ab5-40bb-a602-25aab4bc2656",
-      "models": ["Qwen/Qwen3-235B-A22B-Thinking-2507"],
+      "models": [
+        "Qwen/Qwen3-235B-A22B-Thinking-2507"
+      ],
       "transformer": {
         "use": [
           [
@@ -25,9 +27,15 @@
           ]
         ],
         "Qwen/Qwen3-235B-A22B-Thinking-2507": {
-          "use": ["reasoning"]
+          "use": [
+            "reasoning"
+          ]
         }
       }
     }
-  ]
+  ],
+  "vector_db": {
+    "storage_path": "data/vector_db",
+    "embedding_model": "default"
+  }
 }

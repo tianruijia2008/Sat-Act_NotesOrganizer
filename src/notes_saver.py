@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from typing import Optional, Any
 from datetime import datetime
 
@@ -46,7 +47,7 @@ class NotesSaver:
 
             # Write to file
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(markdown_content)
+                _ = f.write(markdown_content)
 
             self.logger.info(f"Successfully saved organized content to {filepath}")
             return filepath
@@ -195,7 +196,7 @@ class NotesSaver:
 
             # Write to file
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(markdown_content)
+                _ = f.write(markdown_content)
 
             self.logger.info(f"Successfully saved classification result to {filepath}")
             return filepath
@@ -203,6 +204,158 @@ class NotesSaver:
         except Exception as e:
             self.logger.error(f"Error saving classification result: {str(e)}")
             raise
+
+    def update_existing_note(self, existing_note_path: str, new_content: dict[str, Any]) -> str:
+        """
+        Update an existing note with new content, merging related information.
+
+        Args:
+            existing_note_path (str): Path to the existing note file
+            new_content (dict): New organized content to merge
+
+        Returns:
+            str: Path to the updated Markdown file
+        """
+        try:
+            # Read existing note content
+            if os.path.exists(existing_note_path):
+                with open(existing_note_path, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+            else:
+                # If file doesn't exist, create a new one
+                return self.save_organized_content(new_content, os.path.splitext(os.path.basename(existing_note_path))[0])
+
+            # Parse existing content to extract sections
+            existing_sections = self._parse_existing_note(existing_content)
+
+            # Merge new content with existing content
+            merged_content = self._merge_content(existing_sections, new_content)
+
+            # Generate updated Markdown content
+            updated_markdown = self._generate_markdown(merged_content)
+
+            # Write updated content to file
+            with open(existing_note_path, 'w', encoding='utf-8') as f:
+                _ = f.write(updated_markdown)
+
+            self.logger.info(f"Successfully updated existing note at {existing_note_path}")
+            return existing_note_path
+
+        except Exception as e:
+            self.logger.error(f"Error updating existing note: {str(e)}")
+            raise
+
+    def _parse_existing_note(self, content: str) -> dict[str, Any]:
+        """
+        Parse an existing note to extract its sections.
+
+        Args:
+            content (str): The existing note content
+
+        Returns:
+            dict: Parsed sections of the note
+        """
+        sections = {
+            "title": "",
+            "summary": "",
+            "relationships": "",
+            "notes": [],
+            "wrong_questions": [],
+            "metadata": {}
+        }
+
+        # Extract title (first line starting with #)
+        title_match = re.search(r'^# (.+)$', content, re.MULTILINE)
+        if title_match:
+            sections["title"] = title_match.group(1)
+
+        # Extract summary (text under ## Summary)
+        summary_match = re.search(r'## Summary\s+(.+?)(?=\n## |\n---|\Z)', content, re.DOTALL)
+        if summary_match:
+            sections["summary"] = summary_match.group(1).strip()
+
+        # Extract relationships (text under ## Content Relationships)
+        relationships_match = re.search(r'## Content Relationships\s+(.+?)(?=\n## |\n---|\Z)', content, re.DOTALL)
+        if relationships_match:
+            sections["relationships"] = relationships_match.group(1).strip()
+
+        # Extract notes (sections under ## Notes)
+        notes_match = re.search(r'## Notes\s+(.+?)(?=\n## |\n---|\Z)', content, re.DOTALL)
+        if notes_match:
+            notes_content = notes_match.group(1)
+            # Extract individual notes
+            note_matches = re.findall(r'### Note \d+\s+(.+?)(?=\n### Note |\n## |\n---|\Z)', notes_content, re.DOTALL)
+            sections["notes"] = [{"content": note.strip()} for note in note_matches]
+
+        # Extract wrong questions (sections under ## Wrong Questions)
+        questions_match = re.search(r'## Wrong Questions\s+(.+?)(?=\n## |\n---|\Z)', content, re.DOTALL)
+        if questions_match:
+            questions_content = questions_match.group(1)
+            # Extract individual questions
+            question_matches = re.findall(r'### Question \d+\s+(.+?)(?=\n### Question |\n## |\n---|\Z)', questions_content, re.DOTALL)
+            sections["wrong_questions"] = [{"content": question.strip()} for question in question_matches]
+
+        return sections
+
+    def _merge_content(self, existing_sections: dict[str, Any], new_content: dict[str, Any]) -> dict[str, Any]:
+        """
+        Merge existing content with new content.
+
+        Args:
+            existing_sections (dict): Parsed existing content
+            new_content (dict): New content to merge
+
+        Returns:
+            dict: Merged content
+        """
+        merged = {}
+
+        # Merge summary
+        existing_summary = existing_sections.get("summary", "")
+        new_summary = new_content.get("summary", "")
+        merged["summary"] = f"{existing_summary}\n\nUpdated: {new_summary}".strip() if existing_summary else new_summary
+
+        # Merge relationships
+        existing_relationships = existing_sections.get("relationships", "")
+        new_relationships = new_content.get("relationships", "")
+        merged["relationships"] = f"{existing_relationships}\n\n{new_relationships}".strip() if existing_relationships else new_relationships
+
+        # Merge notes
+        existing_notes = existing_sections.get("notes", [])
+        new_notes = new_content.get("notes", [])
+        merged["notes"] = existing_notes + new_notes
+
+        # Merge wrong questions
+        existing_questions = existing_sections.get("wrong_questions", [])
+        new_questions = new_content.get("wrong_questions", [])
+        merged["wrong_questions"] = existing_questions + new_questions
+
+        return merged
+
+    def find_related_notes(self, topic: str) -> list[str]:
+        """
+        Find existing notes related to a specific topic.
+
+        Args:
+            topic (str): Topic to search for
+
+        Returns:
+            list: List of paths to related notes
+        """
+        related_notes = []
+
+        # Search for markdown files in the output directory
+        for filename in os.listdir(self.output_directory):
+            if filename.endswith('.md') and filename.startswith('sat_act_notes'):
+                filepath = os.path.join(self.output_directory, filename)
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    # Simple keyword matching - in a real implementation, you might use
+                    # more sophisticated techniques like TF-IDF or embedding similarity
+                    if topic.lower() in content.lower():
+                        related_notes.append(filepath)
+
+        return related_notes
 
 # Example usage
 if __name__ == "__main__":
