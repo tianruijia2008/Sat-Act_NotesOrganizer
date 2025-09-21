@@ -2,596 +2,1068 @@ import streamlit as st
 import os
 import sys
 import time
-import logging
-import shutil
 from PIL import Image
-import tempfile
-import datetime
-from typing import Union, Optional
 
 # Add the parent directory to the path to allow imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
 
-from src.ocr_processor import OCRProcessor
-from src.ai_processor import AIProcessor
-from src.notes_saver import NotesSaver
-from src.camera_utils import enhance_image_for_text, detect_text_focus_quality, show_camera_help, process_camera_image
+# Ensure project root is in Python path
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+try:
+    # Import from new modular structure
+    from services.note_processing_service import NoteProcessingService
+    from services.ocr_service import OCRService
+    from services.storage_service import StorageService
+    from services.ai_service import AIService
+    from src.utils import get_resource_path, get_folder_size
+    from data.models.note import ImageInfo
 
-# Set page configuration
+    # Initialize services
+    ocr_service = OCRService()
+    ai_service = AIService()
+    storage_service = StorageService()
+    processing_service = NoteProcessingService()
+except ImportError as e:
+    st.error(f"❌ Import error: {e}")
+    st.error("Please make sure all required modules are installed and the project structure is correct.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Service initialization error: {e}")
+    st.error("There was a problem initializing the application services.")
+    st.stop()
+
+# Set page configuration with mobile-friendly settings
 st.set_page_config(
     page_title="SAT/ACT Notes Organizer",
     page_icon="📚",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-def clear_processed_data():
-    """Clear all processed data (notes and vector database) while preserving raw images."""
-    try:
-        # Show confirmation dialog
-        st.sidebar.warning("⚠️ This will delete all processed data!")
-        st.sidebar.info("Raw images in data/raw/ will be preserved.")
+# Add mobile-friendly CSS
+st.markdown(
+    """
+    <style>
+    .stApp {
+        margin: 0;
+        max-width: 100%;
+        overflow-x: hidden;
+    }
+    .stFileUploader > div > div > div > div {
+        border: 2px dashed #ccc;
+        border-radius: 10px;
+        padding: 20px;
+    }
+    /* Mobile-specific styles */
+    @media (max-width: 768px) {
+        .stApp {
+            padding: 0.5rem;
+        }
+        .stFileUploader {
+            width: 100%;
+        }
+        .stSidebar {
+            width: 100% !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-        # Show current directory status
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        st.sidebar.subheader("Current Status:")
+def initialize_session_state():
+    """Initialize session state variables."""
+    if 'uploaded_images' not in st.session_state:
+        st.session_state.uploaded_images = []
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    if 'results' not in st.session_state:
+        st.session_state.results = []
+    if 'show_file_browser' not in st.session_state:
+        st.session_state.show_file_browser = False
+    if 'selected_images' not in st.session_state:
+        st.session_state.selected_images = []
+    if 'debug_mode' not in st.session_state:
+        st.session_state.debug_mode = False
+    if 'ocr_results' not in st.session_state:
+        st.session_state.ocr_results = {}
+    if 'debug_confirmed' not in st.session_state:
+        st.session_state.debug_confirmed = set()
 
-        # Check notes directory
-        notes_dir = os.path.join(project_root, "data", "notes")
-        if os.path.exists(notes_dir) and os.path.isdir(notes_dir):
-            notes_count = len([f for f in os.listdir(notes_dir) if f.endswith('.md')])
-            st.sidebar.text(f"📝 Notes: {notes_count} files")
-        else:
-            st.sidebar.text("📝 Notes: Directory not found")
+def upload_section():
+    """Handle file upload section."""
+    st.header("📤 Upload Images")
 
-        # Check vector DB directory
-        vector_db_dir = os.path.join(project_root, "data", "vector_db")
-        if os.path.exists(vector_db_dir) and os.path.isdir(vector_db_dir):
-            vector_files = len(os.listdir(vector_db_dir))
-            st.sidebar.text(f"🗂️ Vector DB: {vector_files} files")
-        else:
-            st.sidebar.text("🗂️ Vector DB: Directory not found")
-
-        # Check OCR directory
-        ocr_dir = os.path.join(project_root, "data", "ocr")
-        if os.path.exists(ocr_dir) and os.path.isdir(ocr_dir):
-            ocr_files = len(os.listdir(ocr_dir))
-            st.sidebar.text(f"🔍 OCR: {ocr_files} files")
-        else:
-            st.sidebar.text("🔍 OCR: Directory not found")
-
-        # Create columns for buttons
-        col1, col2 = st.sidebar.columns(2)
-
-        if col1.button("Confirm Clear", type="primary", key="confirm_clear"):
-            # Get absolute paths from project root
-            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-
-            # Debug: Show what directories we're trying to clear
-            st.sidebar.info(f"Project root: {project_root}")
-
-            cleared_count = 0
-
-            # Clear notes directory
-            notes_dir = os.path.join(project_root, "data", "notes")
-            st.sidebar.info(f"Checking notes dir: {notes_dir}")
-            if os.path.exists(notes_dir):
-                try:
-                    files_before = len(os.listdir(notes_dir)) if os.path.isdir(notes_dir) else 0
-                    shutil.rmtree(notes_dir)
-                    os.makedirs(notes_dir, exist_ok=True)
-                    st.sidebar.success(f"✅ Notes directory cleared ({files_before} files removed)")
-                    cleared_count += 1
-                except Exception as e:
-                    st.sidebar.error(f"Error clearing notes: {str(e)}")
-            else:
-                st.sidebar.info("Notes directory doesn't exist")
-
-            # Clear vector database directory
-            vector_db_dir = os.path.join(project_root, "data", "vector_db")
-            st.sidebar.info(f"Checking vector DB dir: {vector_db_dir}")
-            if os.path.exists(vector_db_dir):
-                try:
-                    files_before = len(os.listdir(vector_db_dir)) if os.path.isdir(vector_db_dir) else 0
-                    shutil.rmtree(vector_db_dir)
-                    os.makedirs(vector_db_dir, exist_ok=True)
-                    st.sidebar.success(f"✅ Vector database cleared ({files_before} files removed)")
-                    cleared_count += 1
-                except Exception as e:
-                    st.sidebar.error(f"Error clearing vector DB: {str(e)}")
-            else:
-                st.sidebar.info("Vector DB directory doesn't exist")
-
-            # Clear OCR directory
-            ocr_dir = os.path.join(project_root, "data", "ocr")
-            st.sidebar.info(f"Checking OCR dir: {ocr_dir}")
-            if os.path.exists(ocr_dir):
-                try:
-                    files_before = len(os.listdir(ocr_dir)) if os.path.isdir(ocr_dir) else 0
-                    shutil.rmtree(ocr_dir)
-                    os.makedirs(ocr_dir, exist_ok=True)
-                    st.sidebar.success(f"✅ OCR directory cleared ({files_before} files removed)")
-                    cleared_count += 1
-                except Exception as e:
-                    st.sidebar.error(f"Error clearing OCR: {str(e)}")
-            else:
-                st.sidebar.info("OCR directory doesn't exist")
-
-            # Clear results in session state
-            if 'results' in st.session_state:
-                st.session_state.results = []
-            if 'uploaded_images' in st.session_state:
+    # Show current collection status
+    existing_count = len(st.session_state.uploaded_images) if hasattr(st.session_state, 'uploaded_images') else 0
+    if existing_count > 0:
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.info(f"📁 You currently have {existing_count} image{'s' if existing_count != 1 else ''} in your collection")
+        with col2:
+            if st.button("🗑️ Clear Collection", help="Remove all images and start fresh"):
                 st.session_state.uploaded_images = []
-            if 'processing' in st.session_state:
+                st.session_state.selected_images = []
+                # Clear temp directory using storage service
+                storage_service.clear_temp_directory()
+                st.success("Collection cleared!")
+                st.rerun()
+
+    uploaded_files = st.file_uploader(
+        "Choose image files",
+        accept_multiple_files=True,
+        type=['png', 'jpg', 'jpeg', 'bmp', 'tiff'],
+        help="Select multiple images to upload. They will be added to your collection."
+    )
+
+    # Show newly selected files for upload (if any)
+    if uploaded_files:
+        st.subheader(f"📋 New Images Ready to Upload ({len(uploaded_files)})")
+        cols = st.columns(min(len(uploaded_files), 3))
+
+        valid_files = []
+        for idx, uploaded_file in enumerate(uploaded_files):
+            with cols[idx % 3]:
+                try:
+                    # Validate file size (max 10MB)
+                    if uploaded_file.size > 10 * 1024 * 1024:
+                        st.error(f"File {uploaded_file.name} is too large (>10MB)")
+                        continue
+
+                    # Display image preview directly from uploaded file
+                    uploaded_file.seek(0)  # Reset pointer
+                    image = Image.open(uploaded_file)
+
+                    # Convert to RGB if needed (handles RGBA, P mode issues)
+                    if image.mode in ('RGBA', 'P'):
+                        image = image.convert('RGB')
+
+                    st.image(image, caption=f"🆕 {uploaded_file.name}", use_container_width=True)
+
+                    # Display image quality assessment
+                    try:
+                        # Save temporary file to assess quality
+                        temp_assessment_path = os.path.join(get_resource_path('data/temp'), f"temp_assess_{uploaded_file.name}")
+                        os.makedirs(os.path.dirname(temp_assessment_path), exist_ok=True)
+                        uploaded_file.seek(0)
+                        with open(temp_assessment_path, 'wb') as f:
+                            f.write(uploaded_file.read())
+
+                        # Assess image quality
+                        quality_info = ocr_service.assess_image_quality(temp_assessment_path)
+
+                        # Check orientation
+                        orientation_info = ocr_service.detect_orientation(temp_assessment_path)
+
+                        # Clean up temporary file
+                        if os.path.exists(temp_assessment_path):
+                            os.remove(temp_assessment_path)
+
+                        # Display quality grade with color coding
+                        grade_color = {
+                            'A': '🟢',  # Excellent
+                            'B': '🔵',  # Good
+                            'C': '🟡',  # Fair
+                            'D': '🟠',  # Poor
+                            'F': '🔴',  # Very Poor
+                        }.get(quality_info.grade, '⚪')
+
+                        # Display orientation info
+                        orientation_text = ""
+                        if orientation_info.needs_rotation:
+                            method_text = f" ({orientation_info.method or 'auto'})" if orientation_info.method else ""
+                            orientation_text = f" | 🔁 Needs rotation ({orientation_info.angle}°{method_text})"
+
+                        st.caption(f"{grade_color} Quality: {quality_info.quality_description} (Grade {quality_info.grade}){orientation_text} | " +
+                                 f"Size: {uploaded_file.size / 1024:.1f} KB | Format: {image.format}")
+
+                        # Show detailed metrics on hover/expander
+                        with st.expander("📊 Quality Details", expanded=False):
+                            st.write(f"**Overall Score:** {quality_info.overall_score}/100")
+                            if quality_info.metrics:
+                                st.write(f"**Sharpness:** {quality_info.metrics['sharpness']}")
+                                st.write(f"**Contrast:** {quality_info.metrics['contrast']}")
+                                st.write(f"**Brightness:** {quality_info.metrics['brightness']}")
+                                st.write(f"**Noise Level:** {quality_info.metrics['noise_level']}")
+                                st.write(f"**Text Regions:** {quality_info.metrics['text_regions']}")
+                                if 'horizontal_lines' in quality_info.metrics:
+                                    st.write(f"**Horizontal Lines:** {quality_info.metrics['horizontal_lines']}")
+
+                            # Show orientation info
+                            st.write("**Orientation:**")
+                            st.write(f"Angle: {orientation_info.angle}°")
+                            st.write(f"Needs Rotation: {'Yes' if orientation_info.needs_rotation else 'No'}")
+                            if orientation_info.method:
+                                st.write(f"Detection Method: {orientation_info.method}")
+
+                    except Exception as quality_error:
+                        st.caption(f"Size: {uploaded_file.size / 1024:.1f} KB | Format: {image.format}")
+                        st.warning(f"Could not assess image quality: {str(quality_error)}")
+
+                    valid_files.append(uploaded_file)
+
+                except Exception as e:
+                    st.error(f"Error loading {uploaded_file.name}: {str(e)}")
+
+        # Upload button
+        if valid_files:
+            st.markdown("---")
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                if st.button("📤 Upload Images", type="primary", help=f"Add {len(valid_files)} image(s) to collection"):
+                    # Don't clear existing images, append to them instead
+                    if not hasattr(st.session_state, 'uploaded_images'):
+                        st.session_state.uploaded_images = []
+
+                    new_images = []
+
+                    with st.spinner(f"Uploading {len(valid_files)} image(s)..."):
+                        for uploaded_file in valid_files:
+                            try:
+                                # Check if file already exists in collection (avoid true duplicates)
+                                existing_names = [img['name'] for img in st.session_state.uploaded_images]
+                                if uploaded_file.name in existing_names:
+                                    st.warning(f"⚠️ {uploaded_file.name} already exists in collection, skipping...")
+                                    continue
+
+                                # Save to temporary directory using storage service
+                                image_info_obj = storage_service.save_temp_image(uploaded_file, uploaded_file.name)
+
+                                # Convert to dictionary for session state compatibility
+                                image_info = {
+                                    'name': image_info_obj.name,
+                                    'original_name': image_info_obj.original_name,
+                                    'path': image_info_obj.path
+                                }
+                                new_images.append(image_info)
+                            except Exception as save_error:
+                                st.error(f"Error saving {uploaded_file.name}: {str(save_error)}")
+
+                    # Add all new images to session state
+                    if new_images:
+                        st.session_state.uploaded_images.extend(new_images)
+                        added_count = len(new_images)
+
+                        st.success(f"✅ Successfully uploaded {added_count} image{'s' if added_count != 1 else ''} to collection!")
+
+                        # Auto-select new images for processing
+                        for img in new_images:
+                            if img['name'] not in st.session_state.selected_images:
+                                st.session_state.selected_images.append(img['name'])
+
+                        # Clear the file uploader by rerunning (this will reset it)
+                        st.rerun()
+
+            with col2:
+                st.info(f"💡 Ready to upload {len(valid_files)} new image{'s' if len(valid_files) != 1 else ''}")
+
+    # Show all uploaded images with selection checkboxes
+    if st.session_state.uploaded_images:
+        st.markdown("---")
+        st.subheader(f"🖼️ All Uploaded Images ({len(st.session_state.uploaded_images)})")
+
+        # Select all / Select none buttons
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("✅ Select All"):
+                st.session_state.selected_images = [img['name'] for img in st.session_state.uploaded_images]
+                st.rerun()
+        with col2:
+            if st.button("❌ Select None"):
+                st.session_state.selected_images = []
+                st.rerun()
+        with col3:
+            selected_count = len(st.session_state.selected_images)
+            st.write(f"**Selected: {selected_count} image(s)**")
+
+        # Clear all images button
+        col4, _ = st.columns([1, 3])
+        with col4:
+            if st.button("🗑️ Clear All", help="Remove all uploaded images"):
+                # Clear session state
+                st.session_state.uploaded_images = []
+                st.session_state.selected_images = []
+                # Delete temp files using storage service
+                storage_service.clear_temp_directory()
+                st.success("All images cleared!")
+                st.rerun()
+
+        # Display images with checkboxes
+        cols = st.columns(min(len(st.session_state.uploaded_images), 3))
+        for idx, image_info in enumerate(st.session_state.uploaded_images):
+            with cols[idx % 3]:
+                try:
+                    # Checkbox for selection
+                    is_selected = image_info['name'] in st.session_state.selected_images
+                    # Use original name for display if available, otherwise use the unique name
+                    display_name = image_info.get('original_name', image_info['name'])
+                    if st.checkbox(f"Process this image", value=is_selected, key=f"select_{image_info['name']}"):
+                        if image_info['name'] not in st.session_state.selected_images:
+                            st.session_state.selected_images.append(image_info['name'])
+                    else:
+                        if image_info['name'] in st.session_state.selected_images:
+                            st.session_state.selected_images.remove(image_info['name'])
+
+                    # Display image with status indicator
+                    image = Image.open(image_info['path'])
+
+                    # Check if this image has been processed
+                    processed_names = [r.get('image_name', '') for r in st.session_state.results]
+                    is_processed = image_info['name'] in processed_names
+
+                    # Add status emoji to caption
+                    status_emoji = "✅" if is_processed else "⏳"
+                    status_text = "Processed" if is_processed else "Ready"
+                    # Use original name for display if available, otherwise use the unique name
+                    display_name = image_info.get('original_name', image_info['name'])
+                    caption = f"{status_emoji} {display_name} ({status_text})"
+
+                    st.image(image, caption=caption, use_container_width=True)
+
+                    # File info with processing status and quality
+                    file_size = os.path.getsize(image_info['path']) / 1024
+
+                    # Display image quality assessment for uploaded images
+                    try:
+                        quality_info = ocr_service.assess_image_quality(image_info['path'])
+
+                        # Check orientation
+                        orientation_info = ocr_service.detect_orientation(image_info['path'])
+
+                        # Display quality grade with color coding
+                        grade_color = {
+                            'A': '🟢',  # Excellent
+                            'B': '🔵',  # Good
+                            'C': '🟡',  # Fair
+                            'D': '🟠',  # Poor
+                            'F': '🔴',  # Very Poor
+                        }.get(quality_info.grade, '⚪')
+
+                        # Display orientation info
+                        orientation_text = ""
+                        if orientation_info.needs_rotation:
+                            method_text = f" ({orientation_info.method or 'auto'})" if orientation_info.method else ""
+                            orientation_text = f" | 🔁 Needs rotation ({orientation_info.angle}°{method_text})"
+
+                        st.caption(f"{grade_color} Quality: {quality_info.quality_description} (Grade {quality_info.grade}){orientation_text} | " +
+                                 f"Size: {file_size:.1f} KB")
+
+                        # Show detailed metrics on hover/expander
+                        with st.expander("📊 Quality Details", expanded=False):
+                            st.write(f"**Overall Score:** {quality_info.overall_score}/100")
+                            if quality_info.metrics:
+                                st.write(f"**Sharpness:** {quality_info.metrics['sharpness']}")
+                                st.write(f"**Contrast:** {quality_info.metrics['contrast']}")
+                                st.write(f"**Brightness:** {quality_info.metrics['brightness']}")
+                                st.write(f"**Noise Level:** {quality_info.metrics['noise_level']}")
+                                st.write(f"**Text Regions:** {quality_info.metrics['text_regions']}")
+                                if 'horizontal_lines' in quality_info.metrics:
+                                    st.write(f"**Horizontal Lines:** {quality_info.metrics['horizontal_lines']}")
+                                if 'resolution_score' in quality_info.metrics:
+                                    st.write(f"**Resolution Score:** {quality_info.metrics['resolution_score']}")
+                                if 'edges' in quality_info.metrics:
+                                    st.write(f"**Edge Count:** {quality_info.metrics['edges']}")
+
+                            # Show orientation info
+                            st.write("**Orientation:**")
+                            st.write(f"Angle: {orientation_info.angle}°")
+                            st.write(f"Needs Rotation: {'Yes' if orientation_info.needs_rotation else 'No'}")
+                            if orientation_info.method:
+                                st.write(f"Detection Method: {orientation_info.method}")
+
+                    except Exception as quality_error:
+                        st.caption(f"Size: {file_size:.1f} KB")
+
+                    if is_processed:
+                        st.success("Already processed ✓")
+
+                    # Action buttons
+                    col_a, col_b = st.columns(2)
+
+                    with col_a:
+                        # Reprocess button for already processed images
+                        if is_processed:
+                            if st.button("🔄", help=f"Reprocess {display_name}", key=f"reprocess_{image_info['name']}"):
+                                if image_info['name'] not in st.session_state.selected_images:
+                                    st.session_state.selected_images.append(image_info['name'])
+                                st.rerun()
+
+                    with col_b:
+                        # Remove image button
+                        if st.button("🗑️", help=f"Remove {display_name}", key=f"remove_{image_info['name']}"):
+                            # Remove from uploaded images
+                            st.session_state.uploaded_images = [
+                                img for img in st.session_state.uploaded_images
+                                if img['name'] != image_info['name']
+                            ]
+                            # Remove from selected images
+                            if image_info['name'] in st.session_state.selected_images:
+                                st.session_state.selected_images.remove(image_info['name'])
+                            # Delete the temp file using storage service
+                            storage_service.delete_temp_image(image_info['name'])
+                            st.rerun()
+
+                except Exception as e:
+                    # Use original name for display if available, otherwise use the unique name
+                    display_name = image_info.get('original_name', image_info['name'])
+                    st.error(f"Error displaying {display_name}: {str(e)}")
+
+def debug_section():
+    """Display debug information for OCR results."""
+    if not st.session_state.debug_mode or not st.session_state.ocr_results:
+        return
+
+    st.header("🔍 Debug Mode - OCR Results")
+    st.info("Review the OCR results below. Click 'Continue to AI Processing' for each image you want to process.")
+
+    for image_name, ocr_data in st.session_state.ocr_results.items():
+        display_name = ocr_data.get('original_name', image_name)
+        with st.expander(f"📄 {display_name}", expanded=True):
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                # Show image
+                try:
+                    image = Image.open(ocr_data['image_path'])
+                    st.image(image, caption=display_name, use_container_width=True)
+                except:
+                    st.error("Could not display image")
+
+            with col2:
+                # Show OCR result
+                st.subheader("OCR Extracted Text")
+                extracted_text = ocr_data.get('extracted_text', '')
+                if extracted_text:
+                    st.text_area("", extracted_text, height=200, key=f"ocr_text_{image_name}", disabled=False)
+                else:
+                    st.warning("No text was extracted from this image.")
+
+                # Show quality info if available
+                if 'quality_info' in ocr_data:
+                    quality_info = ocr_data['quality_info']
+                    st.subheader("Image Quality")
+                    st.write(f"Grade: {quality_info.grade} ({quality_info.quality_description})")
+                    st.write(f"Overall Score: {quality_info.overall_score}/100")
+
+                # Continue button
+                confirmed = image_name in st.session_state.debug_confirmed
+                if confirmed:
+                    st.success("✅ Ready for AI processing")
+                else:
+                    if st.button("Continue to AI Processing", key=f"continue_ai_{image_name}"):
+                        st.session_state.debug_confirmed.add(image_name)
+                        st.rerun()
+
+def process_images():
+    """Process selected images with OCR and AI."""
+    if not st.session_state.uploaded_images:
+        st.warning("Please upload some images first.")
+        return
+
+    if not st.session_state.selected_images:
+        st.warning("Please select at least one image to process.")
+        return
+
+    # Debug mode toggle
+    st.session_state.debug_mode = st.checkbox("🔍 Enable Debug Mode (Review OCR results before AI processing)",
+                                             value=st.session_state.debug_mode)
+
+    # Show processing button with count
+    selected_count = len(st.session_state.selected_images)
+    button_text = f"🚀 Process {selected_count} Selected Image{'s' if selected_count > 1 else ''}"
+
+    # Show additional info
+    st.info(f"📊 Ready to process: {', '.join(st.session_state.selected_images)}")
+
+    if st.button(button_text, type="primary", disabled=st.session_state.processing):
+        st.session_state.processing = True
+
+        # If in debug mode, extract OCR text and show in debug section
+        if st.session_state.debug_mode:
+            st.session_state.ocr_results = {}
+            st.session_state.debug_confirmed = set()
+
+            # Extract OCR text for all selected images using OCR service
+            with st.spinner("Extracting text from images..."):
+                selected_images = [img for img in st.session_state.uploaded_images
+                                  if img['name'] in st.session_state.selected_images]
+
+                for image_info in selected_images:
+                    try:
+                        # Extract text using OCR service
+                        extracted_text = ocr_service.extract_text(image_info['path'])
+
+                        # Assess image quality
+                        quality_info = ocr_service.assess_image_quality(image_info['path'])
+
+                        # Store OCR result for debug review
+                        st.session_state.ocr_results[image_info['name']] = {
+                            'image_path': image_info['path'],
+                            'original_name': image_info.get('original_name', image_info['name']),
+                            'extracted_text': extracted_text,
+                            'quality_info': quality_info
+                        }
+                    except Exception as e:
+                        st.error(f"Error extracting text from {image_info.get('original_name', image_info['name'])}: {str(e)}")
+
+            st.session_state.processing = False
+            st.info("OCR extraction complete. Review the results in the Debug section below.")
+            st.rerun()
+        else:
+            # Normal processing flow (without debug)
+            # Don't clear all results, only clear results for images being reprocessed
+            existing_result_names = [r.get('image_name', '') for r in st.session_state.results]
+            st.session_state.results = [r for r in st.session_state.results
+                                       if r.get('image_name', '') not in st.session_state.selected_images]
+
+            # Test AI connection
+            st.info("Testing AI connection...")
+            if not ai_service.test_connection():
+                st.error("Failed to connect to AI service. Please check your configuration.")
                 st.session_state.processing = False
+                return
 
-            # Reset clear_data flag
-            st.session_state.clear_data = False
+            # Process each selected image using the processing service
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            if cleared_count > 0:
-                st.sidebar.success(f"🎉 Successfully cleared {cleared_count} directories!")
+            # Filter to only selected images
+            selected_images = [img for img in st.session_state.uploaded_images
+                              if img['name'] in st.session_state.selected_images]
+            total_images = len(selected_images)
+
+            for idx, image_info in enumerate(selected_images):
+                # Use original name for display if available, otherwise use the unique name
+                display_name = image_info.get('original_name', image_info['name'])
+                progress = (idx + 1) / total_images
+                progress_bar.progress(progress)
+                status_text.text(f"Processing {display_name} ({idx + 1}/{total_images})")
+
+                try:
+                    # Create ImageInfo object
+                    image_obj = ImageInfo(
+                        name=image_info['name'],
+                        original_name=display_name,
+                        path=image_info['path']
+                    )
+
+                    # Process image using the processing service
+                    result_obj = processing_service.process_single_image(image_obj)
+
+                    # Convert result to dictionary for display
+                    result = {
+                        'image_name': image_obj.name,
+                        'original_name': display_name,
+                        'image_path': image_obj.path,
+                        'extracted_text': result_obj.ocr_result.text if result_obj.ocr_result else '',
+                        'classification': {
+                            'subject': result_obj.classification_result.subject if result_obj.classification_result else 'general',
+                            'content_type': result_obj.classification_result.content_type if result_obj.classification_result else 'notes',
+                            'confidence': result_obj.classification_result.confidence if result_obj.classification_result else 0,
+                            'key_concepts': result_obj.classification_result.key_concepts if result_obj.classification_result else [],
+                            'notes': result_obj.classification_result.notes if result_obj.classification_result else '',
+                            'summary': result_obj.classification_result.summary if result_obj.classification_result else '',
+                        },
+                        'merged': False  # TODO: Implement merge detection
+                    }
+                    st.session_state.results.append(result)
+
+                except Exception as e:
+                    st.error(f"❌ Error processing {display_name}: {str(e)}")
+                    # Continue processing other images even if one fails
+                    continue
+
+            progress_bar.progress(1.0)
+            success_count = len(st.session_state.results)
+            status_text.text(f"✅ Processing complete! Successfully processed {success_count}/{total_images} images.")
+
+            # Clear selected images after successful processing
+            st.session_state.selected_images = []
+            st.session_state.processing = False
+
+            # Show success message
+            if success_count == total_images:
+                st.success(f"🎉 All {total_images} images processed successfully!")
             else:
-                st.sidebar.warning("No directories were found to clear")
+                st.warning(f"⚠️ Processed {success_count} out of {total_images} images. Some images may have failed.")
 
             time.sleep(2)
             st.rerun()
 
-        if col2.button("Cancel", type="secondary", key="cancel_clear"):
-            st.session_state.clear_data = False
-            st.rerun()
+def process_debug_confirmed():
+    """Process images that have been confirmed in debug mode."""
+    if not st.session_state.debug_mode or not st.session_state.debug_confirmed:
+        return
 
-    except Exception as e:
-        st.sidebar.error(f"Error clearing data: {str(e)}")
-        logger.error(f"Error clearing processed data: {str(e)}")
-        st.session_state.clear_data = False
+    if st.button("🚀 Process Confirmed Images with AI", type="primary"):
+        st.session_state.processing = True
 
-# Initialize session state
-if 'processing' not in st.session_state:
-    st.session_state.processing = False
-if 'results' not in st.session_state:
-    st.session_state.results = []
-if 'current_image' not in st.session_state:
-    st.session_state.current_image = None
-if 'processing_progress' not in st.session_state:
-    st.session_state.processing_progress = 0
-if 'current_step' not in st.session_state:
-    st.session_state.current_step = ""
-if 'camera_image' not in st.session_state:
-    st.session_state.camera_image = None
-
-def save_camera_image(image_data) -> Optional[str]:
-    """Save camera image to raw folder with timestamp filename."""
-    try:
-        # Create raw directory if it doesn't exist
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        raw_dir = os.path.join(project_root, "data", "raw")
-        os.makedirs(raw_dir, exist_ok=True)
-
-        # Generate filename with timestamp
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"camera_{timestamp}.png"
-        file_path = os.path.join(raw_dir, filename)
-
-        # Save image
-        image = Image.open(image_data)
-        image.save(file_path, "PNG")
-
-        return file_path
-    except Exception as e:
-        st.error(f"Error saving camera image: {str(e)}")
-        logger.error(f"Error saving camera image: {str(e)}")
-        return None
-
-def main():
-    st.title("📚 SAT/ACT Notes Organizer")
-
-    # Add configuration sidebar
-    with st.sidebar:
-        st.header("Configuration")
-        st.markdown("Adjust processing options:")
-
-        preprocess_option = st.checkbox("Preprocess Images", value=True,
-                                       help="Apply image preprocessing to improve OCR accuracy")
-        watch_mode = st.checkbox("Watch Mode", value=False,
-                                help="Continuously monitor for new images")
-        show_debug = st.checkbox("Show Debug Info", value=False,
-                                help="Display detailed processing information")
-
-        st.markdown("---")
-        st.header("Data Management")
-
-        # Add clear data button
-        if st.button("Clear All Processed Data", type="secondary",
-                    help="Delete all notes and vector database (raw images preserved)",
-                    key="main_clear_button"):
-            st.session_state.clear_data = True
-
-        if st.session_state.get('clear_data', False):
-            clear_processed_data()
-
-        st.markdown("---")
-        st.markdown("### About")
-        st.markdown("""
-        This tool helps organize SAT/ACT study materials by:
-        1. Extracting text from images
-        2. Classifying content as notes or wrong questions
-        3. Generating structured markdown files
-        """)
-
-    st.markdown("""
-    Upload your SAT/ACT study materials images and automatically generate organized notes.
-    The system will extract text, classify content, and create structured markdown files.
-    """)
-
-    # Create tabs for different sections
-    tab1, tab2, tab3, tab4 = st.tabs(["Upload Images", "Processing Status", "View Results", "Camera Capture"])
-
-    with tab1:
-        upload_section(str(preprocess_option).lower())
-
-    with tab2:
-        processing_section()
-
-    with tab3:
-        results_section(show_debug)
-
-    with tab4:
-        camera_section()
-
-def upload_section(preprocess_option: Union[str, bool]):
-    st.header("Upload Study Material Images")
-
-    # Store preprocess option in session state
-    st.session_state.preprocess_option = preprocess_option
-
-    # File uploader
-    uploaded_files = st.file_uploader(
-        "Choose images to process",
-        type=["png", "jpg", "jpeg"],
-        accept_multiple_files=True
-    )
-
-    if uploaded_files:
-        st.subheader("Image Preview")
-        cols = st.columns(3)
-
-        for i, uploaded_file in enumerate(uploaded_files):
-            with cols[i % 3]:
-                # Display image preview
-                image = Image.open(uploaded_file)
-                st.image(image, caption=uploaded_file.name, use_column_width=True)
-
-                # Show file info
-                st.caption(f"Size: {uploaded_file.size / 1024:.1f} KB")
-
-                # Save to temporary file for processing
-                temp_dir = tempfile.mkdtemp()
-                temp_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(temp_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-
-                # Store in session state
-                if 'uploaded_images' not in st.session_state:
-                    st.session_state.uploaded_images = []
-
-                st.session_state.uploaded_images.append({
-                    'name': uploaded_file.name,
-                    'path': temp_path,
-                    'size': uploaded_file.size
-                })
-
-        # Process button
-        if st.button("Process Images", type="primary", disabled=st.session_state.processing):
-            if 'uploaded_images' in st.session_state and st.session_state.uploaded_images:
-                st.session_state.processing = True
-                st.session_state.results = []
-                st.session_state.processing_progress = 0
-                process_images()
-            else:
-                st.warning("Please upload at least one image to process.")
-    else:
-        st.info("Upload PNG, JPG, or JPEG images of your SAT/ACT study materials.")
-
-def process_images():
-    try:
-        # Get preprocess option from session state
-        preprocess_option = st.session_state.get('preprocess_option', True)
-
-        # Initialize processors
-        config_path = os.path.join(os.path.dirname(__file__), '..', 'config.json')
-        ocr_processor = OCRProcessor()
-        ai_processor = AIProcessor(config_path)
-        notes_saver = NotesSaver("data/notes")
-
-        # Test AI connection first
-        st.session_state.current_status = "Testing AI connection..."
-        st.session_state.current_step = "Testing AI connection"
-        st.session_state.processing_progress = 5
-        time.sleep(0.5)  # Small delay to show status update
-
-        connection_success = ai_processor.test_connection()
-        if not connection_success:
-            st.error("Failed to connect to AI API. Please check your configuration.")
+        # Test AI connection
+        st.info("Testing AI connection...")
+        if not ai_service.test_connection():
+            st.error("Failed to connect to AI service. Please check your configuration.")
             st.session_state.processing = False
             return
 
-        # Process each image
-        total_images = len(st.session_state.uploaded_images)
-        for i, image_info in enumerate(st.session_state.uploaded_images):
-            if not st.session_state.processing:
-                break
+        # Process confirmed images
+        confirmed_images = [name for name in st.session_state.debug_confirmed
+                           if name in st.session_state.ocr_results]
 
-            image_name = image_info['name']
-            image_path = image_info['path']
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        total_images = len(confirmed_images)
 
-            # Update status
-            st.session_state.current_status = f"Processing image {i+1}/{total_images}: {image_name}"
-            st.session_state.current_image = image_name
-            st.session_state.processing_progress = 10 + int((i / total_images) * 80)
+        for idx, image_name in enumerate(confirmed_images):
+            ocr_data = st.session_state.ocr_results[image_name]
+            display_name = ocr_data.get('original_name', image_name)
+
+            progress = (idx + 1) / total_images
+            progress_bar.progress(progress)
+            status_text.text(f"Processing {display_name} with AI ({idx + 1}/{total_images})")
 
             try:
-                # Step 1: Extract text using OCR
-                st.session_state.current_step = "OCR Extraction"
-                st.session_state.processing_progress = 15 + int((i / total_images) * 20)
-                # Handle preprocess option conversion
-                preprocess_bool = preprocess_option if isinstance(preprocess_option, bool) else preprocess_option.lower() == "true"
-                ocr_result = ocr_processor.extract_text(image_path, preprocess=preprocess_bool)
-                ocr_text, doc_id = ocr_result
+                extracted_text = ocr_data.get('extracted_text', '')
 
-                if not ocr_text.strip():
-                    st.warning(f"No text extracted from {image_name}")
+                if not extracted_text.strip():
+                    st.warning(f"No text found in {display_name}")
                     continue
 
-                # Step 2: Classify content using AI
-                st.session_state.current_step = "AI Classification"
-                st.session_state.processing_progress = 35 + int((i / total_images) * 30)
-                classification_result = ai_processor.classify_content(ocr_text)
+                # Generate notes using AI service
+                classification_result = ai_service.process_text(
+                    extracted_text,
+                    display_name
+                )
 
-                # Step 3: Save individual classification result
-                st.session_state.current_step = "Saving Results"
-                st.session_state.processing_progress = 65 + int((i / total_images) * 25)
-                saved_path = notes_saver.save_classification_result(ocr_text, classification_result, image_name)
+                # Create ImageInfo object for saving
+                image_obj = ImageInfo(
+                    name=image_name,
+                    original_name=display_name,
+                    path=ocr_data['image_path']
+                )
 
-                # Store result
-                st.session_state.results.append({
+                # TODO: Implement proper notes saving with the new architecture
+                # For now, we'll create a simple result structure
+                result = {
                     'image_name': image_name,
-                    'image_path': image_path,
-                    'ocr_text': ocr_text,
-                    'classification': classification_result,
-                    'saved_path': saved_path
-                })
+                    'original_name': display_name,
+                    'image_path': ocr_data['image_path'],
+                    'extracted_text': extracted_text,
+                    'classification': {
+                        'subject': classification_result.subject,
+                        'content_type': classification_result.content_type,
+                        'confidence': classification_result.confidence,
+                        'key_concepts': classification_result.key_concepts,
+                        'notes': classification_result.notes,
+                        'summary': classification_result.summary,
+                    },
+                    'merged': False
+                }
+                st.session_state.results.append(result)
 
             except Exception as e:
-                st.error(f"Error processing {image_name}: {str(e)}")
-                logger.error(f"Error processing {image_name}: {str(e)}")
+                st.error(f"❌ Error processing {display_name}: {str(e)}")
+                continue
 
-        # Processing complete
-        st.session_state.processing = False
-        st.session_state.current_status = "Processing complete!"
-        st.session_state.current_step = "Done"
-        st.session_state.processing_progress = 100
-        st.success("All images processed successfully!")
+        progress_bar.progress(1.0)
+        success_count = len([r for r in st.session_state.results
+                            if r.get('image_name') in confirmed_images])
+        status_text.text(f"✅ AI processing complete! Successfully processed {success_count}/{total_images} images.")
 
-    except Exception as e:
-        st.error(f"Error during processing: {str(e)}")
-        logger.error(f"Error during processing: {str(e)}")
+        # Clear debug state
+        st.session_state.debug_confirmed = set()
+        st.session_state.ocr_results = {}
         st.session_state.processing = False
 
-def processing_section():
-    st.header("Processing Status")
+        st.success(f"🎉 Processed {success_count} confirmed images with AI!")
+        time.sleep(2)
+        st.rerun()
 
-    if st.session_state.processing:
-        # Show progress bar
-        st.progress(st.session_state.processing_progress)
+def results_section():
+    """Display processing results."""
+    if not st.session_state.results:
+        return
 
-        # Show current status
-        if 'current_status' in st.session_state:
-            st.subheader(st.session_state.current_status)
+    st.header("📊 Results")
+    st.success(f"Successfully processed {len(st.session_state.results)} image(s)")
 
-        # Show current step with spinner
-        if 'current_step' in st.session_state:
-            st.markdown(f"**Current step:** {st.session_state.current_step}")
-            with st.spinner("Processing..."):
-                time.sleep(0.1)  # This is just to show the spinner
+    # Summary by subject
+    subjects = {}
+    for result in st.session_state.results:
+        subject = result['classification'].get('subject', 'Unknown').lower()
+        if subject not in subjects:
+            subjects[subject] = 0
+        subjects[subject] += 1
 
-        # Show current image
-        if st.session_state.current_image:
-            st.caption(f"Currently processing: {st.session_state.current_image}")
+    if subjects:
+        st.subheader("📚 Summary by Subject")
+        for subject, count in subjects.items():
+            st.write(f"• **{subject.title()}**: {count} note(s)")
 
-    else:
-        if 'current_status' in st.session_state and st.session_state.current_status == "Processing complete!":
-            st.success(st.session_state.current_status)
-            st.progress(100)
-        else:
-            st.info("No processing in progress. Upload images and click 'Process Images' to start.")
+    # Detailed results
+    st.subheader("📝 Detailed Results")
 
-def results_section(show_debug: bool):
-    st.header("Processing Results")
+    for idx, result in enumerate(st.session_state.results):
+        # Use original name for display if available in the result
+        display_name = result.get('original_name', result['image_name'])
+        with st.expander(f"📄 {display_name}", expanded=idx == 0):
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                # Show image
+                try:
+                    image = Image.open(result['image_path'])
+                    st.image(image, caption=display_name, use_container_width=True)
+                except:
+                    st.error("Could not display image")
+
+            with col2:
+                # Show classification
+                classification = result['classification']
+                st.write("**Subject:**", classification.get('subject', 'N/A').title())
+                st.write("**Content Type:**", classification.get('content_type', 'N/A').title())
+                st.write("**Confidence:**", f"{classification.get('confidence', 0):.1f}%")
+
+                # Show merged note indicator
+                if result.get('merged', False):
+                    st.info("ℹ️ This note was merged with an existing note containing similar content")
+
+                # Show generated notes
+                notes = classification.get('notes', '')
+                if notes:
+                    st.write("**Generated Notes:**")
+                    st.text_area("", notes, height=200, key=f"notes_{idx}", disabled=True)
+
+def main():
+    """Main application function."""
+    st.title("📚 SAT/ACT Notes Organizer")
+    st.markdown("Upload images of your study materials to automatically extract text and generate organized notes!")
+
+    # Initialize session state
+    initialize_session_state()
+
+    # Sidebar
+    with st.sidebar:
+        st.header("🛠️ Controls")
+
+        if st.button("🔄 Clear All Data"):
+            st.session_state.uploaded_images = []
+            st.session_state.results = []
+            # Clear temp directory using storage service
+            storage_service.clear_temp_directory()
+            st.success("All data cleared!")
+            time.sleep(1)
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 📋 Status")
+
+        # Current session status
+        if st.session_state.uploaded_images:
+            st.write(f"📤 Session: {len(st.session_state.uploaded_images)} images uploaded")
+        if st.session_state.results:
+            st.write(f"✅ Session: {len(st.session_state.results)} images processed")
+
+        # File system status
+        temp_dir = get_resource_path('data/temp')
+        notes_dir = get_resource_path('data/notes')
+
+        if os.path.exists(temp_dir):
+            temp_count = len([f for f in os.listdir(temp_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+            if temp_count > 0:
+                st.write(f"🖼️ Temp: {temp_count} image(s)")
+
+        if os.path.exists(notes_dir):
+            notes_count = len([f for f in os.listdir(notes_dir) if f.endswith('.md')])
+            if notes_count > 0:
+                st.write(f"📝 Notes: {notes_count} file(s)")
+
+        st.markdown("---")
+        st.markdown("### 📁 Quick Access")
+        if st.button("📂 Browse Files", use_container_width=True):
+            st.session_state.show_file_browser = not st.session_state.show_file_browser
+            st.rerun()
+
+        st.markdown("### ⚡ Quick Actions")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Quick download all notes
+            notes_dir = get_resource_path('data/notes')
+            if os.path.exists(notes_dir) and os.listdir(notes_dir):
+                if st.button("💾", help="Download all notes", key="quick_download"):
+                    import zipfile
+                    import io
+                    try:
+                        note_files = [f for f in os.listdir(notes_dir) if f.endswith('.md')]
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                            for filename in note_files:
+                                file_path = os.path.join(notes_dir, filename)
+                                zip_file.write(file_path, filename)
+                        zip_buffer.seek(0)
+                        st.download_button(
+                            label="📥 notes.zip",
+                            data=zip_buffer.read(),
+                            file_name="sat_act_notes.zip",
+                            mime="application/zip",
+                            key="sidebar_zip_download"
+                        )
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+
+        with col2:
+            # Quick clear temp files
+            if st.button("🧹", help="Clear temp files", key="quick_clear"):
+                try:
+                    # Clear temp directory using storage service
+                    storage_service.clear_temp_directory()
+                    st.success("Temp cleared!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+    # Main content
+    upload_section()
+
+    if st.session_state.uploaded_images:
+        st.markdown("---")
+        process_images()
+
+        # Debug section
+        if st.session_state.debug_mode:
+            debug_section()
+            process_debug_confirmed()
 
     if st.session_state.results:
-        # Show summary
-        st.subheader(f"Processed {len(st.session_state.results)} images")
+        st.markdown("---")
+        results_section()
 
-        # Display results in tabs
-        result_tabs = st.tabs([result['image_name'] for result in st.session_state.results])
+    # File browser section
+    if st.session_state.get('show_file_browser', False):
+        st.markdown("---")
+        file_browser_section()
 
-        for i, (tab, result) in enumerate(zip(result_tabs, st.session_state.results)):
-            with tab:
-                # Create columns for image and results
+def file_browser_section():
+    """File browser to view uploaded images and generated notes."""
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.header("📁 File Browser")
+    with col2:
+        if st.button("✖️ Close", key="close_browser"):
+            st.session_state.show_file_browser = False
+            st.rerun()
+
+    # Show folder statistics
+    temp_dir = get_resource_path('data/temp')
+    notes_dir = get_resource_path('data/notes')
+
+
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        temp_size = get_folder_size(temp_dir) / 1024  # Convert bytes to KB
+        st.metric("📂 Temp Folder", f"{temp_size:.1f} KB")
+    with col2:
+        notes_size = get_folder_size(notes_dir) / 1024  # Convert bytes to KB
+        st.metric("📝 Notes Folder", f"{notes_size:.1f} KB")
+    with col3:
+        total_size = temp_size + notes_size
+        st.metric("💾 Total Storage", f"{total_size:.1f} KB")
+
+    # Create tabs for different folders
+    tab1, tab2 = st.tabs(["🖼️ Uploaded Images", "📝 Generated Notes"])
+
+    with tab1:
+        st.subheader("Temporary Uploaded Images")
+
+        if os.path.exists(temp_dir):
+            temp_files = [f for f in os.listdir(temp_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+
+            if temp_files:
+                st.write(f"Found {len(temp_files)} image(s) in temp folder:")
+
+                # Display images in a grid
+                cols = st.columns(3)
+                for idx, filename in enumerate(temp_files):
+                    with cols[idx % 3]:
+                        try:
+                            image_path = os.path.join(temp_dir, filename)
+                            image = Image.open(image_path)
+                            st.image(image, caption=filename, use_container_width=True)
+
+                            # File info
+                            file_size = os.path.getsize(image_path) / 1024
+                            st.caption(f"Size: {file_size:.1f} KB")
+
+                            # Show file path on toggle
+                            if st.checkbox("Show path", key=f"img_path_{filename}_{idx}"):
+                                st.code(image_path, language=None)
+
+                            # Download button for individual image
+                            with open(image_path, 'rb') as f:
+                                st.download_button(
+                                    label=f"Download {filename}",
+                                    data=f.read(),
+                                    file_name=filename,
+                                    mime="image/jpeg" if filename.lower().endswith(('.jpg', '.jpeg')) else "image/png"
+                                )
+                        except Exception as e:
+                            st.error(f"Error loading {filename}: {str(e)}")
+
+                # Option to clear temp folder
+                if st.button("🗑️ Clear Temporary Images", type="secondary"):
+                    try:
+                        # Clear temp directory using storage service
+                        storage_service.clear_temp_directory()
+                        st.success("Temporary images cleared!")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error clearing temp files: {str(e)}")
+            else:
+                st.info("No images in temp folder. Upload some images first!")
+        else:
+            st.info("Temp folder doesn't exist yet. Upload some images first!")
+
+    with tab2:
+        st.subheader("Generated Notes")
+
+        # Search functionality
+        search_term = st.text_input("🔍 Search notes", placeholder="Search by filename or content...")
+
+        if os.path.exists(notes_dir):
+            all_note_files = [f for f in os.listdir(notes_dir) if f.endswith('.md')]
+
+            # Filter notes based on search term
+            if search_term:
+                note_files = []
+                for filename in all_note_files:
+                    # Search in filename
+                    if search_term.lower() in filename.lower():
+                        note_files.append(filename)
+                        continue
+
+                    # Search in file content
+                    try:
+                        file_path = os.path.join(notes_dir, filename)
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read().lower()
+                            if search_term.lower() in content:
+                                note_files.append(filename)
+                    except:
+                        pass  # Skip files that can't be read
+
+                if search_term and not note_files:
+                    st.warning(f"No notes found containing '{search_term}'")
+                elif search_term:
+                    st.info(f"Found {len(note_files)} note(s) matching '{search_term}'")
+            else:
+                note_files = all_note_files
+
+            if note_files:
+                st.write(f"Found {len(note_files)} note file(s):")
+
+                # Sort by modification time (newest first)
+                note_files.sort(key=lambda x: os.path.getmtime(os.path.join(notes_dir, x)), reverse=True)
+
+                for filename in note_files:
+                    with st.expander(f"📄 {filename}", expanded=False):
+                        try:
+                            file_path = os.path.join(notes_dir, filename)
+
+                            # File info
+                            file_size = os.path.getsize(file_path) / 1024
+                            mod_time = os.path.getmtime(file_path)
+                            mod_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mod_time))
+
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.caption(f"Modified: {mod_time_str} | Size: {file_size:.1f} KB")
+                                # Show file path on toggle
+                                if st.checkbox("Show path", key=f"path_{filename}"):
+                                    st.code(file_path, language=None)
+                            with col2:
+                                # Download button
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    st.download_button(
+                                        label="📥 Download",
+                                        data=f.read(),
+                                        file_name=filename,
+                                        mime="text/markdown",
+                                        key=f"download_{filename}"
+                                    )
+
+                            # Preview the note content
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+
+                            # Show first 500 characters as preview
+                            if len(content) > 500:
+                                preview = content[:500] + "..."
+                                st.markdown("**Preview:**")
+                                st.text(preview)
+
+                                # Option to show full content
+                                if st.button(f"Show Full Content", key=f"full_{filename}"):
+                                    st.markdown("**Full Content:**")
+                                    st.markdown(content)
+                            else:
+                                st.markdown("**Content:**")
+                                st.markdown(content)
+
+                        except Exception as e:
+                            st.error(f"Error reading {filename}: {str(e)}")
+
+                # Option to clear all notes
+                if st.button("🗑️ Clear All Notes", type="secondary"):
+                    try:
+                        for filename in note_files:
+                            os.remove(os.path.join(notes_dir, filename))
+                        st.success("All notes cleared!")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error clearing notes: {str(e)}")
+
+                # Bulk operations
                 col1, col2 = st.columns(2)
-
                 with col1:
-                    st.subheader("Original Image")
-                    image = Image.open(result['image_path'])
-                    st.image(image, use_column_width=True)
+                    # Option to download all notes as ZIP
+                    if st.button("📦 Download All Notes as ZIP"):
+                        try:
+                            import zipfile
+                            import io
 
-                    # Image info
-                    st.caption(f"File: {result['image_name']}")
-                    st.caption(f"Size: {os.path.getsize(result['image_path']) / 1024:.1f} KB")
+                            zip_buffer = io.BytesIO()
+                            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                                for filename in note_files:
+                                    file_path = os.path.join(notes_dir, filename)
+                                    zip_file.write(file_path, filename)
+
+                            zip_buffer.seek(0)
+                            st.download_button(
+                                label="📥 Download ZIP File",
+                                data=zip_buffer.read(),
+                                file_name="sat_act_notes.zip",
+                                mime="application/zip"
+                            )
+                        except Exception as e:
+                            st.error(f"Error creating ZIP file: {str(e)}")
 
                 with col2:
-                    st.subheader("Classification Result")
-                    classification = result['classification']
-                    st.metric("Content Type", classification.get('classification', 'Unknown').title())
-                    st.metric("Confidence", f"{classification.get('confidence', 0.0):.2f}")
-                    st.write(f"**Reasoning:** {classification.get('reasoning', 'No reasoning provided')}")
+                    # Show folder location
+                    if st.button("📍 Open Folder Location"):
+                        st.info(f"Notes folder location:")
+                        st.code(notes_dir, language=None)
 
-                    if 'related_to_context' in classification:
-                        st.write(f"**Related to Context:** {classification.get('related_to_context', '')}")
-
-                # Show extracted text and saved results
-                st.subheader("Extracted Content")
-                with st.expander("View Extracted Text"):
-                    st.text(result['ocr_text'])
-
-                # Show saved markdown file content if it exists
-                if os.path.exists(result['saved_path']):
-                    st.subheader("Generated Markdown File")
-                    with st.expander("View Generated Markdown"):
-                        try:
-                            with open(result['saved_path'], 'r', encoding='utf-8') as f:
-                                markdown_content = f.read()
-                                st.markdown(markdown_content)
-                        except Exception as e:
-                            st.error(f"Error reading markdown file: {str(e)}")
-
-                # Show file path
-                st.caption(f"Saved to: `{result['saved_path']}`")
-
-                # Option to download the markdown file
-                if os.path.exists(result['saved_path']):
-                    with open(result['saved_path'], 'r', encoding='utf-8') as f:
-                        st.download_button(
-                            label="Download Markdown File",
-                            data=f.read(),
-                            file_name=os.path.basename(result['saved_path']),
-                            mime="text/markdown"
-                        )
-
-                # Show debug information if enabled
-                if show_debug:
-                    st.subheader("Debug Information")
-                    with st.expander("View Debug Details"):
-                        st.write("**Classification Result (Raw):**")
-                        st.json(result['classification'])
-                        st.write("**File Path:**", result['saved_path'])
-                        st.write("**Image Path:**", result['image_path'])
-    else:
-        st.info("No results available. Process some images to see results here.")
-
-def camera_section():
-    st.header("📸 Enhanced Camera Capture")
-
-    # Show helpful tips
-    show_camera_help()
-
-    # Add mobile camera optimization script
-    st.markdown("""
-    <script>
-    // Optimize camera for document scanning on mobile
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const constraints = {
-            video: {
-                focusMode: { ideal: "continuous" },
-                facingMode: { ideal: "environment" },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 }
-            }
-        };
-    }
-    </script>
-    """, unsafe_allow_html=True)
-
-    st.markdown("### 📱 Camera Instructions:")
-    st.info("🎯 **Before taking the photo:** Tap on the document in your camera view to focus, then take the picture")
-
-    # Add enable checkbox
-    enable = st.checkbox("Enable camera", value=True, key="camera_enable")
-
-    # Camera input widget with better instructions
-    picture = st.camera_input(
-        "Take a picture of your notes or questions",
-        disabled=not enable,
-        key="camera_input",
-        help="Tap on the document in the camera view to focus before capturing"
-    )
-
-    if picture:
-        # Process and analyze the image
-        enhanced_image, focus_info = process_camera_image(picture)
-
-        col1, col2 = st.columns([2, 1])
-
-        with col1:
-            st.image(enhanced_image, caption="Enhanced Image (Ready for OCR)", use_column_width=True)
-
-        with col2:
-            st.markdown("### Image Analysis")
-
-            # Show focus quality
-            if focus_info['score'] >= 3:
-                st.success(f"✅ **Quality:** {focus_info['quality']}")
-                st.markdown("Perfect for text recognition!")
-            elif focus_info['score'] == 2:
-                st.warning(f"⚠️ **Quality:** {focus_info['quality']}")
-                st.markdown("Usable, but consider retaking for best results")
             else:
-                st.error(f"❌ **Quality:** {focus_info['quality']}")
-                st.markdown("Please retake with better focus")
-
-            st.caption(f"Focus score: {focus_info.get('variance', 0):.1f}")
-
-        # Action buttons
-        st.markdown("### Actions")
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            if st.button("💾 Save Enhanced Image", key="save_camera"):
-                file_path = save_camera_image(picture)
-                if file_path:
-                    st.success(f"Image saved to: {os.path.basename(file_path)}")
-                else:
-                    st.error("Failed to save image")
-
-        with col2:
-            if st.button("🔍 Process This Image", key="process_camera"):
-                file_path = save_camera_image(picture)
-                if file_path:
-                    st.success("Added to processing queue!")
-                    # Store in session state for processing
-                    if 'uploaded_images' not in st.session_state:
-                        st.session_state.uploaded_images = []
-
-                    st.session_state.uploaded_images.append({
-                        'name': os.path.basename(file_path),
-                        'path': file_path,
-                        'size': picture.size if hasattr(picture, 'size') else len(picture.getvalue())
-                    })
-
-                    # Switch to processing tab
-                    st.session_state.processing = True
-                    st.session_state.results = []
-                    st.session_state.processing_progress = 0
-                    st.rerun()
-                else:
-                    st.error("Failed to save image for processing")
-
-        with col3:
-            if st.button("📸 Take Another", key="reset_camera"):
-                st.session_state.pop("camera_input", None)
-                st.rerun()
-
-        # Show tips for improvement if quality is low
-        if focus_info['score'] < 3:
-            st.markdown("### 💡 Tips to Improve:")
-            st.markdown("• **Tap to focus** on the document before capturing")
-            st.markdown("• **Get closer** (6-12 inches from the text)")
-            st.markdown("• **Use better lighting** (avoid shadows)")
-            st.markdown("• **Keep phone steady** (use both hands)")
-            st.markdown("• **Make sure document is flat** and phone is parallel")
+                st.info("No notes generated yet. Process some images first!")
+        else:
+            st.info("Notes folder doesn't exist yet. Process some images first!")
 
 if __name__ == "__main__":
     main()

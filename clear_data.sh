@@ -22,13 +22,13 @@ fi
 
 echo "Found data directory structure:"
 echo "  - Raw images: data/raw/ ($(ls -1 data/raw/ 2>/dev/null | wc -l | tr -d ' ') files)"
-echo "  - Vector database: data/vector_db/ ($(ls -1 data/vector_db/ 2>/dev/null | wc -l | tr -d ' ') files)"
+echo "  - Temporary files: data/temp/ ($(ls -1 data/temp/ 2>/dev/null | wc -l | tr -d ' ') files)"
 echo "  - Generated notes: data/notes/ ($(ls -1 data/notes/ 2>/dev/null | wc -l | tr -d ' ') files)"
 echo ""
 
 # Confirm with user before proceeding
 echo "This will clear:"
-echo "  - Vector database (data/vector_db/)"
+echo "  - Temporary files (data/temp/)"
 echo "  - Generated notes (data/notes/*)"
 echo "  - BUT will preserve raw images (data/raw/)"
 echo ""
@@ -42,12 +42,12 @@ fi
 echo ""
 echo "Clearing data..."
 
-# Clear vector database
-if [ -d "data/vector_db" ]; then
-    rm -rf data/vector_db/
-    echo "✓ Vector database cleared"
+# Clear temporary files
+if [ -d "data/temp" ]; then
+    rm -rf data/temp/
+    echo "✓ Temporary files cleared"
 else
-    echo "⚠ Vector database directory not found"
+    echo "⚠ Temporary files directory not found"
 fi
 
 # Clear generated notes
@@ -59,7 +59,7 @@ else
 fi
 
 # Recreate necessary directories
-mkdir -p data/vector_db
+mkdir -p data/temp
 mkdir -p data/notes
 
 echo ""

@@ -1,607 +1,285 @@
 import json
 import requests
 import logging
-from typing import Any, cast, Optional
-import logging
+import re
+from typing import Any
+import os
+import sys
+from typing import Dict, Any
 
-from src.utils import load_config, get_provider_config
-from src.vector_db import VectorDB
+# Add parent directory to path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+from src.utils import load_config
 
 class AIProcessor:
     """
-    AI Processor for interacting with ModelScope API to analyze SAT/ACT content.
+    Simplified AI Processor for analyzing SAT/ACT study content.
     """
 
-    def __init__(self, config_path: Optional[str] = None):
-        """
-        Initialize AI processor with configuration.
-
-        Args:
-            config_path (str | None): Path to the config file
-        """
-        # Initialize logger first
+    def __init__(self):
+        """Initialize AI processor with configuration."""
         self.logger = logging.getLogger(__name__)
 
-        # Ensure config_path is a string for load_config
-        config_path_str = config_path if config_path is not None else ""
-        self.config: dict[str, Any] = load_config(config_path_str)
-        provider_config = get_provider_config(self.config, 'modelscope')
-        if provider_config is None:
-            raise ValueError("ModelScope provider configuration not found in config file")
-        self.provider_config: dict[str, Any] = cast(dict[str, Any], provider_config)
+        try:
+            self.config = load_config()
+            provider_config = self._get_provider_config()
 
-        base_url = self.provider_config.get('base_url')
-        api_key = self.provider_config.get('api_key')
-        models = self.provider_config.get('models', [])
+            self.base_url = provider_config['base_url']
+            self.api_key = provider_config['api_key']
+            self.model = provider_config['models'][0]
 
-        if not isinstance(base_url, str) or not base_url:
-            raise ValueError("base_url must be provided in ModelScope provider configuration")
-        if not isinstance(api_key, str) or not api_key:
-            raise ValueError("api_key must be provided in ModelScope provider configuration")
-        if not isinstance(models, list) or not models or not isinstance(models[0], str):
-            raise ValueError("At least one model must be specified in ModelScope provider configuration")
+        except Exception as e:
+            self.logger.warning(f"Using fallback config due to error: {e}")
+            # Fallback to environment variables
+            self.base_url = os.getenv('AI_BASE_URL', 'https://api-inference.modelscope.cn/v1/chat/completions')
+            self.api_key = os.getenv('AI_API_KEY', '')
+            self.model = os.getenv('AI_MODEL', 'Qwen/Qwen3-235B-A22B-Thinking-2507')
 
-        self.base_url: str = base_url
-        self.api_key: str = api_key
-        self.model: str = models[0]
-
-        # Initialize headers
-        self.headers: dict[str, str] = {
+        # Always set headers after config is determined
+        self.headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json'
         }
 
-        # Initialize vector database with config
-        self.vector_db = VectorDB(config=self.config)
+    def _get_provider_config(self) -> Dict[str, Any]:
+        """Get ModelScope provider configuration."""
+        providers = self.config.get('providers', [])
+        for provider in providers:
+            if provider.get('name') == 'modelscope':
+                return provider
+        raise ValueError("ModelScope provider not found in configuration")
 
     def test_connection(self) -> bool:
-        """
-        Test connection to the ModelScope API.
-
-        Returns:
-            bool: True if connection successful, False otherwise
-        """
-        try:
-            # Simple health check or model info request
-            test_url = self.base_url.replace('/chat/completions', '/models') if '/chat/completions' in self.base_url else self.base_url
-
-            response = requests.get(test_url, headers=self.headers, timeout=10)
-
-            if response.status_code == 200:
-                self.logger.info("Successfully connected to ModelScope API")
-                return True
-            else:
-                self.logger.error(f"Failed to connect to ModelScope API. Status code: {response.status_code}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Error testing connection to ModelScope API: {str(e)}")
-            return False
-
-    def verify_model_access(self) -> bool:
-        """
-        Verify that the configured model is accessible.
-
-        Returns:
-            bool: True if model is accessible, False otherwise
-        """
-        if not self.model:
-            self.logger.error("No model specified in configuration")
+        """Test connection to the AI API."""
+        if not self.api_key or not self.base_url:
+            self.logger.error("Missing API key or base URL")
             return False
 
         try:
-            # For ModelScope, we can try to get model info
-            model_url = f"{self.base_url.replace('/chat/completions', '')}/models/{self.model}"
-
-            response = requests.get(model_url, headers=self.headers, timeout=10)
-
-            if response.status_code == 200:
-                self.logger.info(f"Successfully verified access to model: {self.model}")
-                return True
-            else:
-                self.logger.error(f"Failed to verify model access. Status code: {response.status_code}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Error verifying model access: {str(e)}")
-            return False
-
-    def send_test_request(self) -> Optional[dict[str, Any]]:
-        """
-        Send a test request to the ModelScope API.
-
-        Returns:
-            dict[str, Any] | None: API response or None if failed
-        """
-        if not self.model:
-            self.logger.error("No model specified in configuration")
-            return None
-
-        try:
-            # Prepare a simple test message
-            payload = {
+            # Send a simple test request
+            test_data = {
                 "model": self.model,
                 "messages": [
-                    {"role": "user", "content": "Hello, this is a test message."}
+                    {"role": "user", "content": "Hello"}
                 ],
-                "max_tokens": 50
+                "max_tokens": 10
             }
 
-            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=30)
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=test_data,
+                timeout=10
+            )
 
             if response.status_code == 200:
-                result = response.json()
-                self.logger.info("Successfully sent test request to ModelScope API")
+                self.logger.info("AI API connection successful")
+                return True
+            else:
+                self.logger.error(f"AI API test failed: {response.status_code}")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error testing AI connection: {e}")
+            return False
+
+    def process_text(self, text: str, image_name: str) -> Dict[str, Any]:
+        """
+        Process extracted text and generate structured notes.
+
+        Args:
+            text: Extracted text from OCR
+            image_name: Name of the source image
+
+        Returns:
+            Dict containing processed information
+        """
+        try:
+            # Create prompt for content analysis
+            prompt = self._create_analysis_prompt(text)
+
+            # Send request to AI API
+            data = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "You are an expert tutor analyzing SAT/ACT study materials. Provide structured, helpful analysis."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 1000,
+                "temperature": 0.3
+            }
+
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code != 200:
+                raise Exception(f"API request failed: {response.status_code}")
+
+            result = response.json()
+            content = result['choices'][0]['message']['content']
+
+            # Parse the structured response
+            return self._parse_ai_response(content, image_name)
+
+        except Exception as e:
+            self.logger.error(f"Error processing text: {e}")
+            return self._create_fallback_response(text, image_name)
+
+    def _create_analysis_prompt(self, text: str) -> str:
+        """Create analysis prompt for the AI."""
+        # Check if text appears corrupted or has OCR issues
+        text_quality = self._assess_text_quality(text)
+
+        if text_quality == "corrupted":
+            return f"""
+The following text appears to be corrupted OCR output from SAT/ACT study materials. Please analyze what you can extract:
+
+CORRUPTED TEXT:
+{text}
+
+Please provide your analysis in the following JSON format, noting the OCR corruption:
+{{
+    "subject": "unknown|math|english|science|social_studies",
+    "content_type": "corrupted_ocr|notes|practice_problem|wrong_answer_explanation|concept_summary",
+    "confidence": 25,
+    "key_concepts": ["any identifiable concepts"],
+    "notes": "Based on the corrupted text, this appears to be [description]. Key readable elements include: [list any readable parts]. Recommend re-scanning with higher quality settings.",
+    "summary": "OCR text is heavily corrupted but may contain [subject] content. Needs better image quality for proper analysis."
+}}
+
+Focus on extracting any meaningful content despite OCR errors and provide guidance for improvement.
+"""
+        else:
+            return f"""
+Analyze the following SAT/ACT study material text and provide a structured response:
+
+TEXT TO ANALYZE:
+{text}
+
+Please provide your analysis in the following JSON format:
+{{
+    "subject": "math|english|science|social_studies",
+    "content_type": "notes|practice_problem|wrong_answer_explanation|concept_summary",
+    "confidence": 85,
+    "key_concepts": ["concept1", "concept2"],
+    "notes": "Well-organized study notes based on the content...",
+    "summary": "Brief summary of the main points..."
+}}
+
+Focus on creating helpful, organized study notes that would be useful for SAT/ACT preparation.
+"""
+
+    def _parse_ai_response(self, response_content: str, image_name: str) -> Dict[str, Any]:
+        """Parse AI response and extract structured data."""
+        try:
+            # Try to extract JSON from the response
+            json_start = response_content.find('{')
+            json_end = response_content.rfind('}') + 1
+
+            if json_start != -1 and json_end > json_start:
+                json_str = response_content[json_start:json_end]
+                parsed_data = json.loads(json_str)
+
+                # Ensure required fields exist
+                result = {
+                    'subject': parsed_data.get('subject', 'general'),
+                    'content_type': parsed_data.get('content_type', 'notes'),
+                    'confidence': parsed_data.get('confidence', 75),
+                    'key_concepts': parsed_data.get('key_concepts', []),
+                    'notes': parsed_data.get('notes', ''),
+                    'summary': parsed_data.get('summary', ''),
+                    'source_image': image_name
+                }
+
                 return result
             else:
-                self.logger.error(f"Failed to send test request. Status code: {response.status_code}")
-                self.logger.error(f"Response: {response.text}")
-                return None
+                # If no JSON found, treat entire response as notes
+                return self._create_fallback_response(response_content, image_name)
 
-        except Exception as e:
-            self.logger.error(f"Error sending test request to ModelScope API: {str(e)}")
-            return None
+        except json.JSONDecodeError:
+            # If JSON parsing fails, use the response as notes
+            return self._create_fallback_response(response_content, image_name)
 
-    def classify_content(self, ocr_text: str) -> dict[str, Any]:
+    def _create_fallback_response(self, content: str, image_name: str) -> Dict[str, Any]:
+        """Create a fallback response when AI processing fails."""
+        return {
+            'subject': 'general',
+            'content_type': 'notes',
+            'confidence': 50,
+            'key_concepts': [],
+            'notes': content if content else "No content could be processed from this image.",
+            'summary': "Content extracted from image but could not be fully analyzed.",
+            'source_image': image_name
+        }
+
+    def classify_content(self, text: str) -> Dict[str, Any]:
+        """Legacy method for backward compatibility."""
+        return self.process_text(text, "unknown_image")
+
+    def _assess_text_quality(self, text: str) -> str:
         """
-        Classify OCR extracted text as either a note or a wrong question.
+        Assess the quality of OCR text to determine processing approach.
 
         Args:
-            ocr_text (str): Text extracted from an image using OCR
+            text: The text to assess
 
         Returns:
-            Dict[str, Any]: Classification result with type and confidence
+            str: Quality assessment ('good', 'poor', 'corrupted')
         """
-        try:
-            # Get similar documents from vector database for context
-            similar_docs = self.vector_db.query_similar(ocr_text, top_k=3)
+        if not text or len(text) < 10:
+            return "poor"
 
-            # Prepare context from similar documents, distinguishing sources
-            context_sections = []
-            for i, doc in enumerate(similar_docs):
-                # Determine source of the document
-                source = doc["metadata"].get("source", "unknown")
-                if source == "obsidian":
-                    source_label = "Obsidian Note"
-                    title = doc["metadata"].get("title", "Untitled")
-                    context_sections.append(f"Context {i+1} (Source: {source_label}, Title: {title}): {doc['text'][:200]}...")
-                else:
-                    doc_type = doc["metadata"].get("type", "unknown")
-                    doc_topic = doc["metadata"].get("topic", "unknown")
-                    context_sections.append(f"Context {i+1} (Source: OCR, Type: {doc_type}, Topic: {doc_topic}): {doc['text'][:200]}...")
+        # Count readable vs unreadable characters
+        words = text.split()
+        if len(words) == 0:
+            return "corrupted"
 
-            context_str = "\n\n".join(context_sections) if context_sections else "No relevant context found."
+        # Check for signs of severe OCR corruption
+        corruption_score = 0
 
-            # Prepare the prompt for the AI model
-            prompt = f"""
-            Analyze the following text extracted from an image and classify it as either a \"note\" or a \"wrong question\".
+        # 1. Too many single characters scattered around
+        single_chars = len([w for w in words if len(w) == 1 and not w.isalnum()])
+        if single_chars > len(words) * 0.25:  # Lower threshold
+            corruption_score += 1
 
-            A \"note\" is educational content such as formulas, concepts, explanations, or study materials.
-            A \"wrong question\" is a practice problem or test question that was answered incorrectly,
-            typically with an explanation of the mistake and the correct approach.
+        # 2. Too many special characters relative to letters
+        special_chars = len([c for c in text if not c.isalnum() and not c.isspace() and c not in '.,!?()-'])
+        total_chars = len(text)
+        if total_chars > 0 and special_chars / total_chars > 0.3:  # Lower threshold
+            corruption_score += 1
 
-            Relevant context from previous materials:
-            {context_str}
+        # 3. Very low ratio of recognizable words
+        recognizable_words = len([w for w in words if len(w) >= 3 and sum(c.isalpha() for c in w) / len(w) > 0.7])
+        if len(words) > 0 and recognizable_words / len(words) < 0.4:  # Lower threshold
+            corruption_score += 1
 
-            Text to analyze:
-            {ocr_text}
+        # 4. Excessive repetition of noise patterns (scattered letters)
+        if len(re.findall(r'[a-zA-Z]\s+[a-zA-Z]\s+[a-zA-Z]', text)) > 5:  # Lower threshold
+            corruption_score += 1
 
-            Respond in JSON format with the following structure:
-            {{
-                \"classification\": \"note\" or \"wrong_question\",
-                \"confidence\": a number between 0 and 1,
-                \"reasoning\": \"brief explanation of why this classification was chosen\",
-                \"related_to_context\": \"brief explanation of how this content relates to the provided context (if applicable)\"
-            }}
-            """
+        # 5. Common OCR artifacts
+        ocr_artifacts = len(re.findall(r'\b(ee|oe|ae|ce|Se|Le|Ae|Ve|We|He)\b', text))
+        if ocr_artifacts > 10:
+            corruption_score += 1
 
-            # Prepare the payload for the API request
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.3,
-                "max_tokens": 500
-            }
+        # 6. Excessive punctuation noise
+        noise_punct = len(re.findall(r'[—–@#$%^&*_+={}[\]|\\:";\'<>?,./`~]', text))
+        if noise_punct > len(text) * 0.1:
+            corruption_score += 1
 
-            # Send the request to the ModelScope API
-            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=60)
+        # 7. Pattern of meaningless character combinations
+        meaningless_combos = len(re.findall(r'\b[a-zA-Z]{1,2}\s+[a-zA-Z]{1,2}\s', text))
+        if meaningless_combos > 15:
+            corruption_score += 1
 
-            if response.status_code == 200:
-                result = response.json()
-
-                # Extract the content from the response
-                if 'choices' in result and len(result['choices']) > 0:
-                    content = result['choices'][0].get('message', {}).get('content', '')
-
-                    # Try to parse the JSON response
-                    try:
-                        classification_result = json.loads(content)
-                        self.logger.info(f"Successfully classified content: {classification_result.get('classification')}")
-                        return classification_result
-                    except json.JSONDecodeError:
-                        # If JSON parsing fails, return a default response
-                        self.logger.warning("Failed to parse JSON response from AI model")
-                        return {
-                            "classification": "unknown",
-                            "confidence": 0.0,
-                            "reasoning": "Could not parse AI response"
-                        }
-                else:
-                    self.logger.error("Unexpected response format from AI model")
-                    return {
-                        "classification": "unknown",
-                        "confidence": 0.0,
-                        "reasoning": "Unexpected response format"
-                    }
-            else:
-                self.logger.error(f"Failed to classify content. Status code: {response.status_code}")
-                self.logger.error(f"Response: {response.text}")
-                return {
-                    "classification": "unknown",
-                    "confidence": 0.0,
-                    "reasoning": f"API request failed with status {response.status_code}"
-                }
-
-        except Exception as e:
-            self.logger.error(f"Error classifying content: {str(e)}")
-            return {
-                "classification": "unknown",
-                "confidence": 0.0,
-                "reasoning": f"Exception occurred: {str(e)}"
-            }
-
-    def recommend_organization_strategy(self, content_items: list[tuple[str, dict[str, Any], str]]) -> dict[str, Any]:
-        """
-        First-stage AI analysis to recommend content organization strategy.
-
-        Args:
-            content_items (List[Tuple[str, Dict[str, Any], str]]): List of tuples containing
-                (ocr_text, classification_result, image_filename)
-
-        Returns:
-            Dict[str, Any]: Organization strategy recommendation
-        """
-        try:
-            # Get context from vector database about similar content
-            all_ocr_texts = [item[0] for item in content_items]
-            combined_text = " ".join(all_ocr_texts)
-            similar_docs = self.vector_db.query_similar(combined_text, top_k=5)
-
-            # Prepare context from similar documents, distinguishing sources
-            context_sections = []
-            for i, doc in enumerate(similar_docs):
-                # Determine source of the document
-                source = doc["metadata"].get("source", "unknown")
-                if source == "obsidian":
-                    source_label = "Obsidian Note"
-                    title = doc["metadata"].get("title", "Untitled")
-                    context_sections.append(f"Previous content {i+1} (Source: {source_label}, Title: {title}): {doc['text'][:200]}...")
-                else:
-                    doc_type = doc["metadata"].get("type", "unknown")
-                    doc_topic = doc["metadata"].get("topic", "unknown")
-                    context_sections.append(f"Previous content {i+1} (Source: OCR, Type: {doc_type}, Topic: {doc_topic}): {doc['text'][:200]}...")
-
-            context_str = "\n\n".join(context_sections) if context_sections else "No relevant previous content found."
-
-            # Prepare the prompt for the AI model
-            content_descriptions = []
-            for i, (ocr_text, classification, image_filename) in enumerate(content_items):
-                char_count = len(ocr_text)
-                content_type = classification.get('classification', 'unknown')
-                confidence = classification.get('confidence', 0.0)
-
-                content_descriptions.append(
-                    f"Item {i+1} (File: {image_filename}, Type: {content_type}, "
-                    f"Confidence: {confidence:.2f}, Characters: {char_count}): {ocr_text[:200]}..."
-                )
-
-            prompt = f"""
-            Analyze the following SAT/ACT study materials and recommend the best organization strategy.
-            You must decide whether to:
-            1. Combine all items into a single comprehensive Markdown file
-            2. Create separate files for each item
-            3. Group related items into multiple files
-
-            Consider these factors:
-            - Content similarity and relationships
-            - Character count (longer content may need separate files)
-            - Content type (notes vs wrong questions)
-            - Educational value of grouping vs separation
-            - Relationship to previously processed content (provided below)
-
-            Previously processed similar content:
-            {context_str}
-
-            Content items:
-            {chr(10).join(content_descriptions)}
-
-            Respond in JSON format with the following structure:
-            {{
-                "strategy": "combine_all" or "separate_all" or "group_related",
-                "reasoning": "explanation of why this strategy was chosen",
-                "groups": [
-                    {{
-                        "name": "descriptive name for this group",
-                        "items": [list of item indices that belong together],
-                        "rationale": "why these items should be grouped"
-                    }}
-                ],
-                "recommendations": {{
-                    "file_naming": "suggestion for file naming convention",
-                    "content_structure": "suggestion for how to structure the content"
-                }},
-                "relationship_to_previous_content": "how the new content relates to previously processed content"
-            }}
-
-            Important rules:
-            - If strategy is "combine_all", groups should contain all items in one group
-            - If strategy is "separate_all", groups should contain one item each
-            - If strategy is "group_related", groups should logically cluster related items
-            - Always provide exactly one group if strategy is "combine_all"
-            - Consider how the new content relates to previously processed content when making recommendations
-            """
-
-            # Prepare the payload for the API request
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.4,
-                "max_tokens": 1500
-            }
-
-            # Send the request to the ModelScope API
-            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=120)
-
-            if response.status_code == 200:
-                result = response.json()
-
-                # Extract the content from the response
-                if 'choices' in result and len(result['choices']) > 0:
-                    content = result['choices'][0].get('message', {}).get('content', '')
-
-                    # Try to parse the JSON response
-                    try:
-                        recommendation = json.loads(content)
-                        self.logger.info(f"Successfully generated organization strategy: {recommendation.get('strategy')}")
-                        return recommendation
-                    except json.JSONDecodeError:
-                        # If JSON parsing fails, return a default response
-                        self.logger.warning("Failed to parse JSON response from AI model for organization strategy")
-                        return {
-                            "strategy": "separate_all",
-                            "reasoning": "Could not parse AI response, defaulting to separate files",
-                            "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
-                                      for i in range(len(content_items))],
-                            "recommendations": {
-                                "file_naming": "individual_item_{index}",
-                                "content_structure": "Separate files for each item"
-                            }
-                        }
-                else:
-                    self.logger.error("Unexpected response format from AI model for organization strategy")
-                    return {
-                        "strategy": "separate_all",
-                        "reasoning": "Unexpected response format, defaulting to separate files",
-                        "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
-                                  for i in range(len(content_items))],
-                        "recommendations": {
-                            "file_naming": "individual_item_{index}",
-                            "content_structure": "Separate files for each item"
-                        }
-                    }
-            else:
-                self.logger.error(f"Failed to generate organization strategy. Status code: {response.status_code}")
-                self.logger.error(f"Response: {response.text}")
-                return {
-                    "strategy": "separate_all",
-                    "reasoning": f"API request failed with status {response.status_code}, defaulting to separate files",
-                    "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
-                              for i in range(len(content_items))],
-                    "recommendations": {
-                        "file_naming": "individual_item_{index}",
-                        "content_structure": "Separate files for each item"
-                    }
-                }
-
-        except Exception as e:
-            self.logger.error(f"Error generating organization strategy: {str(e)}")
-            return {
-                "strategy": "separate_all",
-                "reasoning": f"Exception occurred: {str(e)}, defaulting to separate files",
-                "groups": [{"name": f"Item {i+1}", "items": [i], "rationale": "Default separation"}
-                          for i in range(len(content_items))],
-                "recommendations": {
-                    "file_naming": "individual_item_{index}",
-                    "content_structure": "Separate files for each item"
-                }
-            }
-
-    def organize_content_batch(self, content_items: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
-        """
-        Organize a batch of content items (notes and wrong questions) into structured format.
-
-        Args:
-            content_items (List[Tuple[str, Dict[str, Any]]]): List of tuples containing (ocr_text, classification_result)
-
-        Returns:
-            Dict[str, Any]: Organized content with relationships identified
-        """
-        try:
-            # Get context from vector database about similar content
-            all_ocr_texts = [item[0] for item in content_items]
-            combined_text = " ".join(all_ocr_texts)
-            similar_docs = self.vector_db.query_similar(combined_text, top_k=5)
-
-            # Prepare context from similar documents, distinguishing sources
-            context_sections = []
-            for i, doc in enumerate(similar_docs):
-                # Determine source of the document
-                source = doc["metadata"].get("source", "unknown")
-                if source == "obsidian":
-                    source_label = "Obsidian Note"
-                    title = doc["metadata"].get("title", "Untitled")
-                    context_sections.append(f"Previous content {i+1} (Source: {source_label}, Title: {title}): {doc['text'][:200]}...")
-                else:
-                    doc_type = doc["metadata"].get("type", "unknown")
-                    doc_topic = doc["metadata"].get("topic", "unknown")
-                    context_sections.append(f"Previous content {i+1} (Source: OCR, Type: {doc_type}, Topic: {doc_topic}): {doc['text'][:200]}...")
-
-            context_str = "\n\n".join(context_sections) if context_sections else "No relevant previous content found."
-
-            # Prepare the prompt for the AI model
-            content_descriptions = []
-            for i, (ocr_text, classification) in enumerate(content_items):
-                content_descriptions.append(
-                    f"Item {i+1} (Type: {classification.get('classification', 'unknown')}): {ocr_text[:200]}..."
-                )
-
-            prompt = f"""
-            Organize the following SAT/ACT study materials into a structured format suitable for Obsidian notes.
-            Identify relationships between notes and wrong questions, such as which notes relate to which wrong questions.
-            Also consider how this content relates to previously processed content provided below.
-
-            Previously processed similar content:
-            {context_str}
-
-            Content items:
-            {chr(10).join(content_descriptions)}
-
-            Respond in JSON format with the following structure:
-            {{
-                "summary": "overall summary of the content",
-                "notes": [
-                    {{
-                        "content": "the note content",
-                        "related_wrong_questions": [list of indices of related wrong questions]
-                    }}
-                ],
-                "wrong_questions": [
-                    {{
-                        "content": "the wrong question content",
-                        "related_notes": [list of indices of related notes],
-                        "mistake_explanation": "explanation of the mistake",
-                        "correct_approach": "correct approach to solve the problem"
-                    }}
-                ],
-                "relationships": "description of how the items relate to each other",
-                "relationship_to_previous_content": "how this content relates to previously processed content"
-            }}
-            """
-
-            # Prepare the payload for the API request
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.5,
-                "max_tokens": 2000
-            }
-
-            # Send the request to the ModelScope API
-            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=120)
-
-            if response.status_code == 200:
-                result = response.json()
-
-                # Extract the content from the response
-                if 'choices' in result and len(result['choices']) > 0:
-                    content = result['choices'][0].get('message', {}).get('content', '')
-
-                    # Try to parse the JSON response
-                    try:
-                        organized_content = json.loads(content)
-                        self.logger.info("Successfully organized content batch")
-                        return organized_content
-                    except json.JSONDecodeError:
-                        # If JSON parsing fails, return a default response
-                        self.logger.warning("Failed to parse JSON response from AI model for batch organization")
-                        return {
-                            "summary": "Failed to organize content",
-                            "notes": [],
-                            "wrong_questions": [],
-                            "relationships": "Could not parse AI response"
-                        }
-                else:
-                    self.logger.error("Unexpected response format from AI model for batch organization")
-                    return {
-                        "summary": "Failed to organize content",
-                        "notes": [],
-                        "wrong_questions": [],
-                        "relationships": "Unexpected response format"
-                    }
-            else:
-                self.logger.error(f"Failed to organize content batch. Status code: {response.status_code}")
-                self.logger.error(f"Response: {response.text}")
-                return {
-                    "summary": "Failed to organize content",
-                    "notes": [],
-                    "wrong_questions": [],
-                    "relationships": f"API request failed with status {response.status_code}"
-                }
-
-        except Exception as e:
-            self.logger.error(f"Error organizing content batch: {str(e)}")
-            return {
-                "summary": "Failed to organize content",
-                "notes": [],
-                "wrong_questions": [],
-                "relationships": f"Exception occurred: {str(e)}"
-            }
-
-    def organize_content_by_groups(self, content_items: list[tuple[str, dict[str, Any], str]],
-                                 groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """
-        Second-stage AI processing to organize content according to recommended groups.
-
-        Args:
-            content_items (List[Tuple[str, Dict[str, Any], str]]): List of tuples containing
-                (ocr_text, classification_result, image_filename)
-            groups (List[Dict[str, Any]]): Group definitions from recommendation
-
-        Returns:
-            List[Dict[str, Any]]: List of organized content for each group
-        """
-        organized_groups = []
-
-        try:
-            for group in groups:
-                group_name = group.get('name', 'Unnamed Group')
-                item_indices = group.get('items', [])
-
-                # Extract content items for this group
-                group_content_items = [content_items[i] for i in item_indices if i < len(content_items)]
-
-                # Convert to the format expected by organize_content_batch
-                batch_items = [(item[0], item[1]) for item in group_content_items]
-
-                # Organize the content in this group
-                organized_content = self.organize_content_batch(batch_items)
-                organized_content['group_name'] = group_name
-                organized_content['group_rationale'] = group.get('rationale', '')
-                organized_content['item_indices'] = item_indices
-                organized_content['source_files'] = [content_items[i][2] for i in item_indices if i < len(content_items)]
-
-                organized_groups.append(organized_content)
-
-            self.logger.info(f"Successfully organized content into {len(organized_groups)} groups")
-            return organized_groups
-
-        except Exception as e:
-            self.logger.error(f"Error organizing content by groups: {str(e)}")
-            # Fallback: organize each item separately
-            fallback_groups = []
-            for i, (ocr_text, classification, image_filename) in enumerate(content_items):
-                batch_items = [(ocr_text, classification)]
-                organized_content = self.organize_content_batch(batch_items)
-                organized_content['group_name'] = f"Item {i+1}: {image_filename}"
-                organized_content['group_rationale'] = "Fallback organization - individual item"
-                organized_content['item_indices'] = [i]
-                organized_content['source_files'] = [image_filename]
-                fallback_groups.append(organized_content)
-
-            return fallback_groups
+        if corruption_score >= 3:
+            return "corrupted"
+        elif corruption_score >= 1:
+            return "poor"
+        else:
+            return "good"
